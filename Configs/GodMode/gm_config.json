@@ -1,0 +1,35 @@
+{
+  "version": "1.0.0",
+  "middleware": {
+    "url": "http://localhost:8000",
+    "health_endpoint": "/health"
+  },
+  "game_master": {
+    "update_interval_seconds": 30,
+    "llm_enabled": true,
+    "max_ai_squads": 30,
+    "max_vehicles": 20,
+    "max_dead_bodies": 30,
+    "body_cleanup_delay_seconds": 180,
+    "wreck_cleanup_delay_seconds": 300,
+    "player_safe_cleanup_radius_meters": 100
+  },
+  "scaling": {
+    "comment": "Automatic limits based on player count",
+    "0_players":  { "max_squads": 10, "max_vehicles": 5,  "update_interval": 30 },
+    "1-4_players": { "max_squads": 15, "max_vehicles": 8,  "update_interval": 30 },
+    "5-12_players":{ "max_squads": 30, "max_vehicles": 15, "update_interval": 45 },
+    "13+_players": { "max_squads": 50, "max_vehicles": 20, "update_interval": 60 }
+  },
+  "weather_ids": ["Clear", "Cloudy", "Overcast", "Rainy", "Storm", "Foggy"],
+  "vehicle_types": {
+    "us": ["m998_humvee", "m998_humvee_mg", "m151_jeep", "m35_truck"],
+    "ussr": ["uaz469", "uaz469_mg", "btr70", "ural_truck", "bmp1", "t72"],
+    "helicopters": ["uh1h"]
+  },
+  "squad_types": {
+    "us": ["us_rifle_squad", "us_fire_team", "us_mg_team", "us_at_team", "us_sniper_team"],
+    "ussr": ["ussr_rifle_squad", "ussr_fire_team", "ussr_mg_team", "ussr_at_team", "ussr_sniper_team"],
+    "fia": ["fia_squad"]
+  }
+}

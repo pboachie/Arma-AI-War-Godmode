@@ -11,6 +11,15 @@
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #0a0f0a; }
+  button:hover { filter: brightness(1.3); }
+  button:active { filter: brightness(0.9); transform: scale(0.98); }
+  select:hover { border-color: rgba(0,255,136,0.35) !important; }
+  input:focus, select:focus { border-color: rgba(0,255,136,0.4) !important; }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: #0a0f0a; }
+  ::-webkit-scrollbar-thumb { background: rgba(0,255,136,0.15); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(0,255,136,0.3); }
+  ::selection { background: rgba(0,255,136,0.2); color: #ccddcc; }
 </style>
 </head>
 <body>
@@ -102,21 +111,26 @@ function SectionHeader({ children }) {
 function UnitRow({ unit }) {
   const hp = (unit.health_pct || 0) * 100;
   const hpColor = hp > 60 ? "#00ff88" : hp > 30 ? "#ffaa00" : "#ff4444";
+  const orderColors = { patrol: "#00ff88", defend: "#ffaa00", attack: "#ff4444", move: "#00aaff" };
+  const orderColor = orderColors[unit.current_order] || "#667766";
+  const pos = Array.isArray(unit.position) ? `${unit.position[0]}, ${unit.position[2]}` : "\u2014";
   return (
     <div
       style={{
         display: "flex",
         alignItems: "center",
-        gap: 12,
+        gap: 10,
         padding: "6px 0",
         borderBottom: "1px solid rgba(0,255,136,0.06)",
         fontSize: 12,
         fontFamily: "JetBrains Mono",
       }}
     >
-      <span style={{ color: "#00ff88", width: 90, flexShrink: 0 }}>{unit.unit_id}</span>
-      <span style={{ color: "#889988", width: 110, flexShrink: 0 }}>{unit.unit_type}</span>
-      <span style={{ color: "#667766", width: 60, flexShrink: 0 }}>str:{unit.strength || "?"}</span>
+      <span style={{ color: "#00ff88", width: 80, flexShrink: 0 }}>{unit.unit_id}</span>
+      <span style={{ color: "#889988", width: 100, flexShrink: 0 }}>{unit.unit_type}</span>
+      <span style={{ color: orderColor, flexShrink: 0, fontSize: 11 }}>{unit.current_order || "\u2014"}</span>
+      <span style={{ color: "#667766", width: 50, flexShrink: 0 }}>str:{unit.strength || "?"}</span>
+      <span style={{ color: "#556655", width: 120, flexShrink: 0, fontSize: 11 }}>{pos}</span>
       <div style={{ flex: 1, background: "rgba(0,255,136,0.08)", height: 4, borderRadius: 2, overflow: "hidden" }}>
         <div style={{ width: `${hp}%`, height: "100%", background: hpColor, borderRadius: 2 }} />
       </div>
@@ -146,12 +160,16 @@ function CommandEntry({ cmd, index }) {
       }}
       onClick={() => setExpanded(!expanded)}
     >
-      <div style={{ display: "flex", gap: 10, fontSize: 12, fontFamily: "JetBrains Mono" }}>
+      <div style={{ display: "flex", gap: 10, fontSize: 12, fontFamily: "JetBrains Mono", alignItems: "center" }}>
+        {cmd._source === "manual" && (
+          <span style={{ fontSize: 9, padding: "1px 5px", background: "rgba(255,170,0,0.15)", color: "#ffaa00", border: "1px solid rgba(255,170,0,0.3)", letterSpacing: 0.5, flexShrink: 0 }}>MAN</span>
+        )}
         <span style={{ color, fontWeight: 600, width: 140, flexShrink: 0 }}>{cmd.command_type}</span>
         <span style={{ color: "#667766", width: 80, flexShrink: 0 }}>{cmd.unit_id || "\u2014"}</span>
         <span style={{ color: "#556655", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {cmd.narrative || (typeof cmd.parameters === "string" ? cmd.parameters : JSON.stringify(cmd.parameters)) || ""}
         </span>
+        {cmd._ts && <span style={{ color: "#334433", fontSize: 10, flexShrink: 0 }}>{ts(cmd._ts)}</span>}
       </div>
       {expanded && (
         <div style={{ marginTop: 6, fontSize: 11, color: "#556655", fontFamily: "JetBrains Mono", lineHeight: 1.5 }}>
@@ -343,8 +361,9 @@ function Dashboard() {
   const friendlyUnits = state.friendly_units || [];
   const enemyUnits = state.enemy_units || [];
   const players = state.players || [];
+  const contacts = state.contacts || [];
   const events = state.recent_events || [];
-  const allCommands = commandLog.flatMap((c) => (c.commands?.commands || []).map((cmd) => ({ ...cmd, _ts: c.timestamp })));
+  const allCommands = commandLog.flatMap((c) => (c.commands?.commands || []).map((cmd) => ({ ...cmd, _ts: c.timestamp, _source: c.source || "llm" })));
 
   const tabStyle = (t) => ({
     padding: "8px 20px",
@@ -455,7 +474,10 @@ function Dashboard() {
             <SectionHeader>Server Stats</SectionHeader>
             <div style={{ fontSize: 12, fontFamily: "JetBrains Mono", color: "#556655", lineHeight: 1.8 }}>
               <div>Uptime: {health ? fmtTime(health.uptime_seconds) : "\u2014"}</div>
-              <div>Input tokens: {health?.total_input_tokens?.toLocaleString() ?? "\u2014"} \u00b7 Output tokens: {health?.total_output_tokens?.toLocaleString() ?? "\u2014"}</div>
+              <div>Active sessions: <span style={{ color: "#00ff88" }}>{health?.active_sessions ?? "\u2014"}</span> {"\u00b7"} Memory messages: <span style={{ color: "#88bbff" }}>{health?.memory_messages ?? "\u2014"}</span></div>
+              <div>Input tokens: {health?.total_input_tokens?.toLocaleString() ?? "\u2014"} {"\u00b7"} Output tokens: {health?.total_output_tokens?.toLocaleString() ?? "\u2014"}</div>
+              <div>Total tokens: <span style={{ color: "#ccddcc" }}>{health ? ((health.total_input_tokens || 0) + (health.total_output_tokens || 0)).toLocaleString() : "\u2014"}</span></div>
+              <div>Avg tokens/request: <span style={{ color: "#ccddcc" }}>{health && health.total_requests > 0 ? Math.round((health.total_input_tokens || 0) / health.total_requests).toLocaleString() : "\u2014"}</span></div>
               <div>Error rate: {health ? fmt(health.total_errors / Math.max(health.total_requests, 1) * 100) : "\u2014"}%</div>
               {health?.glm_endpoint && <div>GLM endpoint: {health.glm_endpoint}</div>}
             </div>
@@ -491,18 +513,130 @@ function Dashboard() {
                 </div>
               ))
             )}
+
+            <SectionHeader>Contacts ({contacts.length})</SectionHeader>
+            {contacts.length === 0 ? (
+              <div style={{ color: "#445544", fontSize: 12, fontFamily: "JetBrains Mono" }}>No contacts detected</div>
+            ) : (
+              contacts.map((c, i) => {
+                const conf = (c.confidence || 0) * 100;
+                const confColor = conf > 70 ? "#00ff88" : conf > 40 ? "#ffaa00" : "#ff4444";
+                const pos = Array.isArray(c.last_known_position) ? c.last_known_position.join(", ") : "\u2014";
+                return (
+                  <div
+                    key={i}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 12,
+                      padding: "6px 0",
+                      borderBottom: "1px solid rgba(0,255,136,0.06)",
+                      fontSize: 12,
+                      fontFamily: "JetBrains Mono",
+                    }}
+                  >
+                    <span style={{ color: "#00ff88", width: 90, flexShrink: 0 }}>{c.contact_id}</span>
+                    <span style={{ color: "#889988", width: 110, flexShrink: 0 }}>{c.unit_type}</span>
+                    <span style={{ color: confColor, width: 60, flexShrink: 0 }}>{conf.toFixed(0)}%</span>
+                    <span style={{ color: "#667766", flex: 1 }}>{pos}</span>
+                    <span style={{ color: "#556655", flexShrink: 0 }}>{c.seconds_since_seen != null ? `${c.seconds_since_seen}s ago` : "\u2014"}</span>
+                  </div>
+                );
+              })
+            )}
           </>
         )}
 
         {/* COMMAND LOG TAB */}
         {tab === "commands" && (
           <>
-            <SectionHeader>Command History ({allCommands.length} commands)</SectionHeader>
+            <SectionHeader>Command History ({allCommands.length} commands{(() => { const m = allCommands.filter(c => c._source === "manual").length; return m > 0 ? `, ${m} manual` : ""; })()}, {commandLog.length} batches)</SectionHeader>
             <div ref={logRef} style={{ maxHeight: 500, overflowY: "auto" }}>
-              {allCommands.length === 0 ? (
+              {commandLog.length === 0 ? (
                 <div style={{ color: "#445544", fontSize: 12, fontFamily: "JetBrains Mono" }}>No commands issued yet</div>
               ) : (
-                [...allCommands].reverse().map((cmd, i) => <CommandEntry key={i} cmd={cmd} index={i} />)
+                [...commandLog].reverse().map((batch, batchIdx) => {
+                  const batchSource = batch.source || "llm";
+                  const batchCmds = (batch.commands?.commands || []).map((cmd) => ({
+                    ...cmd,
+                    _ts: batch.timestamp,
+                    _source: batchSource,
+                  }));
+                  const narrative = batch.commands?.narrative_broadcast;
+                  return (
+                    <div key={batchIdx} style={{ marginBottom: 8 }}>
+                      {/* Batch header */}
+                      <div
+                        style={{
+                          background: "rgba(0,255,136,0.04)",
+                          borderTop: batchIdx > 0 ? "1px solid rgba(0,255,136,0.12)" : "none",
+                          padding: "8px 10px 6px",
+                          display: "flex",
+                          flexWrap: "wrap",
+                          alignItems: "center",
+                          gap: 12,
+                          fontSize: 11,
+                          fontFamily: "JetBrains Mono",
+                        }}
+                      >
+                        <span style={{ color: "#889988" }}>{ts(batch.timestamp)}</span>
+                        <span
+                          style={{
+                            fontSize: 9,
+                            padding: "1px 6px",
+                            letterSpacing: 0.5,
+                            fontWeight: 600,
+                            background: batchSource === "manual"
+                              ? "rgba(255,170,0,0.15)"
+                              : "rgba(0,255,136,0.12)",
+                            color: batchSource === "manual" ? "#ffaa00" : "#00ff88",
+                            border: batchSource === "manual"
+                              ? "1px solid rgba(255,170,0,0.3)"
+                              : "1px solid rgba(0,255,136,0.3)",
+                          }}
+                        >
+                          {batchSource === "manual" ? "MANUAL" : "LLM"}
+                        </span>
+                        <span style={{ color: "#667766" }}>
+                          {batchCmds.length} cmd{batchCmds.length !== 1 ? "s" : ""}
+                        </span>
+                        {batch.mission_time != null && (
+                          <span style={{ color: "#556655" }}>
+                            T+ {fmtTime(batch.mission_time)}
+                          </span>
+                        )}
+                      </div>
+                      {/* Narrative broadcast */}
+                      {narrative && (
+                        <div
+                          style={{
+                            padding: "4px 10px 6px",
+                            background: "rgba(0,255,136,0.02)",
+                            fontSize: 11,
+                            fontFamily: "JetBrains Mono",
+                            fontStyle: "italic",
+                            color: "#667766",
+                            lineHeight: 1.4,
+                          }}
+                        >
+                          {"\u275d"} {narrative}
+                        </div>
+                      )}
+                      {/* Batch commands */}
+                      <div style={{ paddingLeft: 6 }}>
+                        {batchCmds.length === 0 ? (
+                          <div style={{ color: "#445544", fontSize: 11, fontFamily: "JetBrains Mono", padding: "4px 10px" }}>
+                            (no commands in batch)
+                          </div>
+                        ) : (
+                          batchCmds.map((cmd, cmdIdx) => (
+                            <CommandEntry key={cmdIdx} cmd={cmd} index={cmdIdx} />
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
               )}
             </div>
           </>

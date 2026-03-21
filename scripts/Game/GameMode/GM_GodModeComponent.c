@@ -53,6 +53,11 @@ class GM_GodModeComponent : SCR_BaseGameModeComponent
     protected bool m_bInitialized = false;
     protected int m_iTotalCommandsExecuted = 0;
 
+    // Player movement tracking (Priority 4)
+    protected ref map<int, ref array<vector>> m_mPlayerPositionTrails;
+    protected ref map<int, vector> m_mPlayerLastPositions;
+    protected ref map<int, float> m_mPlayerLastUpdateTimes;
+
     // ═══════════════════════════════════════════════
     // Lifecycle
     // ═══════════════════════════════════════════════
@@ -78,9 +83,13 @@ class GM_GodModeComponent : SCR_BaseGameModeComponent
         m_NarrativeMgr = new GM_NarrativeManager();
         m_TriggerMgr = new GM_TriggerManager();
         m_aRecentEvents = {};
+        m_mPlayerPositionTrails = new map<int, ref array<vector>>();
+        m_mPlayerLastPositions = new map<int, vector>();
+        m_mPlayerLastUpdateTimes = new map<int, float>();
 
         // Wire up owner references
         m_SquadMgr.SetOwner(this);
+        m_SquadMgr.Init();
         m_TriggerMgr.SetOwner(this);
 
         // Apply limits
@@ -249,11 +258,17 @@ class GM_GodModeComponent : SCR_BaseGameModeComponent
         state.total_spawned_groups = m_SquadMgr.GetSquadCount();
         state.total_spawned_vehicles = m_VehicleMgr.GetVehicleCount();
 
+        // Terrain context (Priority 5)
+        state.terrain_samples = CollectTerrainSamples(state.players, state.enemy_units);
+
         string json = state.Pack();
         m_RestClient.SendSITREP(json);
 
         // Clear event log after sending
         m_aRecentEvents.Clear();
+
+        // Reset per-cycle combat stats
+        m_SquadMgr.ResetCycleStats();
     }
 
     protected ref array<ref GM_PlayerState> CollectPlayerStates()
@@ -285,6 +300,44 @@ class GM_GodModeComponent : SCR_BaseGameModeComponent
                     playerEntity.FindComponent(CompartmentAccessComponent));
             ps.is_in_vehicle = (compAccess && compAccess.IsInCompartment());
             ps.vehicle_type = ps.is_in_vehicle ? "unknown" : "";
+
+            // Movement vectors (Priority 4)
+            vector currentPos = playerEntity.GetOrigin();
+
+            // Calculate velocity from position delta
+            vector lastPos = vector.Zero;
+            float lastTime = 0;
+            if (m_mPlayerLastPositions.Find(pid, lastPos) && m_mPlayerLastUpdateTimes.Find(pid, lastTime))
+            {
+                float dt = m_fMissionTime - lastTime;
+                if (dt > 0.1)
+                {
+                    ps.velocity = Vector(
+                        (currentPos[0] - lastPos[0]) / dt,
+                        (currentPos[1] - lastPos[1]) / dt,
+                        (currentPos[2] - lastPos[2]) / dt
+                    );
+                }
+            }
+            m_mPlayerLastPositions.Set(pid, currentPos);
+            m_mPlayerLastUpdateTimes.Set(pid, m_fMissionTime);
+
+            // Heading from entity angles
+            vector angles = playerEntity.GetAngles();
+            ps.heading = angles[0]; // yaw
+            if (ps.heading < 0) ps.heading += 360;
+
+            // Position trail (last 5 positions)
+            ref array<vector> trail;
+            if (!m_mPlayerPositionTrails.Find(pid, trail))
+            {
+                trail = new array<vector>();
+                m_mPlayerPositionTrails.Set(pid, trail);
+            }
+            trail.Insert(currentPos);
+            if (trail.Count() > 5)
+                trail.Remove(0);
+            ps.position_trail = trail;
 
             players.Insert(ps);
         }

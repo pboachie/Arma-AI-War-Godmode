@@ -10,6 +10,24 @@ class GM_SquadManager
     // Reference back to main component for event logging
     protected GM_GodModeComponent m_pOwner;
 
+    // ── Order Execution Tracking (Priority 1) ──
+    protected ref map<string, string> m_mCurrentOrders;           // squad_id -> order type
+    protected ref map<string, vector> m_mOrderTargets;            // squad_id -> target position
+    protected ref map<string, float> m_mOrderTimestamps;          // squad_id -> time when order was issued
+
+    // ── Per-Unit Combat Stats (Priority 6) ──
+    protected ref map<string, int> m_mKillsSinceReport;           // squad_id -> kills this cycle
+    protected ref map<string, int> m_mCasualtiesSinceReport;      // squad_id -> losses this cycle
+
+    void Init()
+    {
+        m_mCurrentOrders = new map<string, string>();
+        m_mOrderTargets = new map<string, vector>();
+        m_mOrderTimestamps = new map<string, float>();
+        m_mKillsSinceReport = new map<string, int>();
+        m_mCasualtiesSinceReport = new map<string, int>();
+    }
+
     void SetOwner(GM_GodModeComponent owner)
     {
         m_pOwner = owner;
@@ -62,6 +80,13 @@ class GM_SquadManager
         string sid = "squad_" + m_iSquadCounter;
         m_mSquads.Set(sid, group);
 
+        // Initialize tracking for new squad
+        m_mCurrentOrders.Set(sid, "idle");
+        m_mOrderTargets.Set(sid, position);
+        m_mOrderTimestamps.Set(sid, System.GetTickCount() / 1000.0);
+        m_mKillsSinceReport.Set(sid, 0);
+        m_mCasualtiesSinceReport.Set(sid, 0);
+
         // Subscribe to lifecycle events
         group.GetOnEmpty().Insert(OnSquadEmpty);
         group.GetOnAgentRemoved().Insert(OnAgentLost);
@@ -98,6 +123,10 @@ class GM_SquadManager
         wp.SetCompletionRadius(20);
         group.AddWaypoint(wp);
         Print("[GodMode:Squad] " + squadId + " → MOVE to " + destination.ToString(false));
+
+        m_mCurrentOrders.Set(squadId, "move");
+        m_mOrderTargets.Set(squadId, destination);
+        m_mOrderTimestamps.Set(squadId, System.GetTickCount() / 1000.0);
     }
 
     void OrderAttack(string squadId, vector target)
@@ -113,6 +142,10 @@ class GM_SquadManager
         wp.SetCompletionRadius(30);
         group.AddWaypoint(wp);
         Print("[GodMode:Squad] " + squadId + " → ATTACK at " + target.ToString(false));
+
+        m_mCurrentOrders.Set(squadId, "attack");
+        m_mOrderTargets.Set(squadId, target);
+        m_mOrderTimestamps.Set(squadId, System.GetTickCount() / 1000.0);
     }
 
     void OrderDefend(string squadId, vector position)
@@ -128,6 +161,10 @@ class GM_SquadManager
         wp.SetCompletionRadius(50);
         group.AddWaypoint(wp);
         Print("[GodMode:Squad] " + squadId + " → DEFEND at " + position.ToString(false));
+
+        m_mCurrentOrders.Set(squadId, "defend");
+        m_mOrderTargets.Set(squadId, position);
+        m_mOrderTimestamps.Set(squadId, System.GetTickCount() / 1000.0);
     }
 
     void OrderPatrol(string squadId, vector center)
@@ -166,6 +203,10 @@ class GM_SquadManager
             group.AddWaypoint(cycleWp);
 
         Print("[GodMode:Squad] " + squadId + " → PATROL around " + center.ToString(false));
+
+        m_mCurrentOrders.Set(squadId, "patrol");
+        m_mOrderTargets.Set(squadId, center);
+        m_mOrderTimestamps.Set(squadId, System.GetTickCount() / 1000.0);
     }
 
     void OrderSeekDestroy(string squadId, vector area)
@@ -181,6 +222,10 @@ class GM_SquadManager
         wp.SetCompletionRadius(200);
         group.AddWaypoint(wp);
         Print("[GodMode:Squad] " + squadId + " → SEEK & DESTROY at " + area.ToString(false));
+
+        m_mCurrentOrders.Set(squadId, "seek_and_destroy");
+        m_mOrderTargets.Set(squadId, area);
+        m_mOrderTimestamps.Set(squadId, System.GetTickCount() / 1000.0);
     }
 
     void OrderAmbush(string squadId, vector position, string params)
@@ -209,6 +254,10 @@ class GM_SquadManager
         }
 
         Print("[GodMode:Squad] " + squadId + " → AMBUSH at " + position.ToString(false));
+
+        m_mCurrentOrders.Set(squadId, "ambush");
+        m_mOrderTargets.Set(squadId, position);
+        m_mOrderTimestamps.Set(squadId, System.GetTickCount() / 1000.0);
     }
 
     void OrderRetreat(string squadId, vector fallbackPosition)
@@ -229,6 +278,10 @@ class GM_SquadManager
         }
 
         Print("[GodMode:Squad] " + squadId + " → RETREAT to " + fallbackPosition.ToString(false));
+
+        m_mCurrentOrders.Set(squadId, "retreat");
+        m_mOrderTargets.Set(squadId, fallbackPosition);
+        m_mOrderTimestamps.Set(squadId, System.GetTickCount() / 1000.0);
     }
 
     // ═══════════════════════════════════════════════
@@ -246,6 +299,14 @@ class GM_SquadManager
 
         SCR_EntityHelper.DeleteEntityAndChildren(group);
         m_mSquads.Remove(squadId);
+
+        // Clean up tracking data
+        m_mCurrentOrders.Remove(squadId);
+        m_mOrderTargets.Remove(squadId);
+        m_mOrderTimestamps.Remove(squadId);
+        m_mKillsSinceReport.Remove(squadId);
+        m_mCasualtiesSinceReport.Remove(squadId);
+
         Print("[GodMode:Squad] Despawned: " + squadId);
     }
 
@@ -281,9 +342,31 @@ class GM_SquadManager
                 Print("[GodMode:Squad] " + sid + " lost agent, strength: " + remaining);
                 if (m_pOwner)
                     m_pOwner.LogEvent("agent_lost:" + sid + ":strength=" + remaining);
+
+                // Track casualty
+                int prev = 0;
+                m_mCasualtiesSinceReport.Find(sid, prev);
+                m_mCasualtiesSinceReport.Set(sid, prev + 1);
                 break;
             }
         }
+    }
+
+    // ═══════════════════════════════════════════════
+    // Combat Stats
+    // ═══════════════════════════════════════════════
+
+    void RecordKill(string squadId)
+    {
+        int prev = 0;
+        m_mKillsSinceReport.Find(squadId, prev);
+        m_mKillsSinceReport.Set(squadId, prev + 1);
+    }
+
+    void ResetCycleStats()
+    {
+        m_mKillsSinceReport.Clear();
+        m_mCasualtiesSinceReport.Clear();
     }
 
     // ═══════════════════════════════════════════════
@@ -314,7 +397,49 @@ class GM_SquadManager
             state.strength = group.GetAgentsCount();
             state.health_pct = (state.strength > 0) ? 1.0 : 0.0;
             state.faction = faction;
-            state.current_order = "active";
+
+            // Order execution feedback
+            string orderType = "idle";
+            m_mCurrentOrders.Find(m_mSquads.GetKey(i), orderType);
+            state.current_order = orderType;
+
+            vector orderTarget = vector.Zero;
+            m_mOrderTargets.Find(m_mSquads.GetKey(i), orderTarget);
+
+            float dist = 0;
+            if (orderTarget != vector.Zero)
+                dist = vector.Distance(state.position, orderTarget);
+            state.distance_to_objective = dist;
+
+            float orderTime = 0;
+            m_mOrderTimestamps.Find(m_mSquads.GetKey(i), orderTime);
+            float now = System.GetTickCount() / 1000.0;
+            state.time_since_order = (orderTime > 0) ? (now - orderTime) : 0;
+            state.time_in_current_order = state.time_since_order;
+
+            // Determine order status
+            if (state.strength <= 0)
+                state.order_status = "wiped_out";
+            else if (dist < 30 && orderType != "idle")
+                state.order_status = "arrived";
+            else if (state.health_pct < 0.5)
+                state.order_status = "engaged";
+            else if (orderType == "idle")
+                state.order_status = "idle";
+            else
+                state.order_status = "moving";
+
+            // Combat stats
+            int kills = 0;
+            m_mKillsSinceReport.Find(m_mSquads.GetKey(i), kills);
+            state.kills = kills;
+
+            int casualties = 0;
+            m_mCasualtiesSinceReport.Find(m_mSquads.GetKey(i), casualties);
+            state.casualties = casualties;
+
+            state.ammo_status = "full";  // TODO: query actual ammo when API available
+            state.is_suppressed = (state.health_pct < 0.7 && state.order_status == "engaged");
 
             states.Insert(state);
         }

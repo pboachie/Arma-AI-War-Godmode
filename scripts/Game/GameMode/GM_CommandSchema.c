@@ -15,6 +15,18 @@ class GM_UnitState : JsonApiStruct
     float health_pct;       // 0.0 – 1.0
     string faction;         // "us", "ussr", "fia"
 
+    // Order execution feedback (Priority 1)
+    string order_status;        // "idle", "moving", "arrived", "engaged", "stuck", "wiped_out"
+    float distance_to_objective; // meters to current waypoint target
+    float time_since_order;     // seconds since last command was issued
+
+    // Per-unit combat stats (Priority 6)
+    int kills;                  // kills since last SITREP
+    int casualties;             // losses since last SITREP
+    string ammo_status;         // "full", "medium", "low", "empty"
+    bool is_suppressed;         // currently taking effective fire
+    float time_in_current_order; // seconds executing current order
+
     void GM_UnitState()
     {
         RegV("unit_id");
@@ -24,6 +36,14 @@ class GM_UnitState : JsonApiStruct
         RegV("current_order");
         RegV("health_pct");
         RegV("faction");
+        RegV("order_status");
+        RegV("distance_to_objective");
+        RegV("time_since_order");
+        RegV("kills");
+        RegV("casualties");
+        RegV("ammo_status");
+        RegV("is_suppressed");
+        RegV("time_in_current_order");
     }
 }
 
@@ -53,6 +73,11 @@ class GM_PlayerState : JsonApiStruct
     bool is_in_vehicle;
     string vehicle_type;
 
+    // Movement vectors (Priority 4)
+    vector velocity;            // direction + speed vector
+    float heading;              // compass direction player is facing (0-360)
+    ref array<vector> position_trail; // last 5 positions for path prediction
+
     void GM_PlayerState()
     {
         RegV("player_id");
@@ -60,6 +85,25 @@ class GM_PlayerState : JsonApiStruct
         RegV("health_pct");
         RegV("is_in_vehicle");
         RegV("vehicle_type");
+        RegV("velocity");
+        RegV("heading");
+        RegV("position_trail");
+    }
+}
+
+class GM_TerrainSample : JsonApiStruct
+{
+    vector position;
+    float elevation;            // meters above sea level
+    string terrain_type;        // "forest", "open", "urban", "road", "water", "hill"
+    float cover_density;        // 0.0-1.0 (building/tree density)
+
+    void GM_TerrainSample()
+    {
+        RegV("position");
+        RegV("elevation");
+        RegV("terrain_type");
+        RegV("cover_density");
     }
 }
 
@@ -80,6 +124,9 @@ class GM_GameState : JsonApiStruct
     int total_spawned_groups;
     int total_spawned_vehicles;
 
+    // Terrain context (Priority 5)
+    ref array<ref GM_TerrainSample> terrain_samples;
+
     void GM_GameState()
     {
         RegV("friendly_units");
@@ -96,6 +143,7 @@ class GM_GameState : JsonApiStruct
         RegV("wind_direction");
         RegV("total_spawned_groups");
         RegV("total_spawned_vehicles");
+        RegV("terrain_samples");
     }
 }
 

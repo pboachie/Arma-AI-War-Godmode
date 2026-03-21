@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>God Mode — Command & Control</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0f0a; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+const API_BASE = window.location.origin;
+const POLL_INTERVAL = 3000;
+
+// ── Utility ──
+const fmt = (n) => (typeof n === "number" ? n.toFixed(1) : "\u2014");
+const fmtTime = (s) => {
+  if (!s && s !== 0) return "\u2014";
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  const sec = Math.floor(s % 60);
+  if (h > 0) return `${h}h ${m % 60}m`;
+  return `${m}m ${sec}s`;
+};
+
+const ts = (epoch) => {
+  if (!epoch) return "\u2014";
+  return new Date(epoch * 1000).toLocaleTimeString();
+};
+
+// ═══════════════════════════════════════════════
+// COMPONENTS
+// ═══════════════════════════════════════════════
+
+function StatusDot({ ok }) {
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        width: 8,
+        height: 8,
+        borderRadius: "50%",
+        background: ok ? "#00ff88" : "#ff4444",
+        boxShadow: ok ? "0 0 6px #00ff8866" : "0 0 6px #ff444466",
+        marginRight: 8,
+      }}
+    />
+  );
+}
+
+function StatCard({ label, value, sub, accent }) {
+  return (
+    <div
+      style={{
+        background: "rgba(0,255,136,0.03)",
+        border: "1px solid rgba(0,255,136,0.12)",
+        padding: "14px 18px",
+        flex: 1,
+        minWidth: 140,
+      }}
+    >
+      <div style={{ fontSize: 11, color: "#667766", letterSpacing: 1.5, fontFamily: "JetBrains Mono", textTransform: "uppercase" }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 28, fontWeight: 700, color: accent || "#00ff88", fontFamily: "Rajdhani", marginTop: 2, lineHeight: 1 }}>
+        {value}
+      </div>
+      {sub && <div style={{ fontSize: 11, color: "#556655", fontFamily: "JetBrains Mono", marginTop: 4 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function SectionHeader({ children }) {
+  return (
+    <div
+      style={{
+        fontSize: 11,
+        letterSpacing: 2,
+        color: "#00ff88",
+        fontFamily: "JetBrains Mono",
+        textTransform: "uppercase",
+        borderBottom: "1px solid rgba(0,255,136,0.15)",
+        paddingBottom: 6,
+        marginBottom: 12,
+        marginTop: 24,
+      }}
+    >
+      \u25a0 {children}
+    </div>
+  );
+}
+
+function UnitRow({ unit }) {
+  const hp = (unit.health_pct || 0) * 100;
+  const hpColor = hp > 60 ? "#00ff88" : hp > 30 ? "#ffaa00" : "#ff4444";
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        padding: "6px 0",
+        borderBottom: "1px solid rgba(0,255,136,0.06)",
+        fontSize: 12,
+        fontFamily: "JetBrains Mono",
+      }}
+    >
+      <span style={{ color: "#00ff88", width: 90, flexShrink: 0 }}>{unit.unit_id}</span>
+      <span style={{ color: "#889988", width: 110, flexShrink: 0 }}>{unit.unit_type}</span>
+      <span style={{ color: "#667766", width: 60, flexShrink: 0 }}>str:{unit.strength || "?"}</span>
+      <div style={{ flex: 1, background: "rgba(0,255,136,0.08)", height: 4, borderRadius: 2, overflow: "hidden" }}>
+        <div style={{ width: `${hp}%`, height: "100%", background: hpColor, borderRadius: 2 }} />
+      </div>
+      <span style={{ color: hpColor, width: 40, textAlign: "right", flexShrink: 0 }}>{hp.toFixed(0)}%</span>
+    </div>
+  );
+}
+
+function CommandEntry({ cmd, index }) {
+  const [expanded, setExpanded] = useState(false);
+  const typeColors = {
+    move: "#00aaff", attack: "#ff4444", defend: "#ffaa00", patrol: "#00ff88",
+    spawn_infantry: "#aa88ff", spawn_vehicle: "#ff88aa", set_weather: "#88ddff",
+    retreat: "#ffcc00", explosion: "#ff6600", smoke: "#aaaaaa",
+  };
+  const color = typeColors[cmd.command_type] || "#00ff88";
+
+  return (
+    <div
+      style={{
+        borderLeft: `2px solid ${color}`,
+        padding: "6px 10px",
+        marginBottom: 4,
+        background: expanded ? "rgba(0,255,136,0.04)" : "transparent",
+        cursor: "pointer",
+        transition: "background 0.15s",
+      }}
+      onClick={() => setExpanded(!expanded)}
+    >
+      <div style={{ display: "flex", gap: 10, fontSize: 12, fontFamily: "JetBrains Mono" }}>
+        <span style={{ color, fontWeight: 600, width: 140, flexShrink: 0 }}>{cmd.command_type}</span>
+        <span style={{ color: "#667766", width: 80, flexShrink: 0 }}>{cmd.unit_id || "\u2014"}</span>
+        <span style={{ color: "#556655", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {cmd.narrative || cmd.parameters || ""}
+        </span>
+      </div>
+      {expanded && (
+        <div style={{ marginTop: 6, fontSize: 11, color: "#556655", fontFamily: "JetBrains Mono", lineHeight: 1.5 }}>
+          {cmd.target_position && <div>Target: <span style={{ color: "#889988" }}>{cmd.target_position}</span></div>}
+          {cmd.parameters && <div>Params: <span style={{ color: "#889988" }}>{cmd.parameters}</span></div>}
+          {cmd.reasoning && <div>Reasoning: <span style={{ color: "#7799aa" }}>{cmd.reasoning}</span></div>}
+          {cmd.narrative && <div>Narrative: <span style={{ color: "#aaaa77" }}>"{cmd.narrative}"</span></div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════
+// MANUAL COMMAND PANEL
+// ═══════════════════════════════════════════════
+
+function ManualCommandPanel({ onSend, serverUrl }) {
+  const [cmdType, setCmdType] = useState("spawn_infantry");
+  const [params, setParams] = useState("ussr_rifle_squad");
+  const [pos, setPos] = useState("3500,0,4800");
+  const [unitId, setUnitId] = useState("new");
+  const [narrative, setNarrative] = useState("");
+  const [status, setStatus] = useState("");
+
+  const send = async () => {
+    const body = {
+      commands: [{
+        command_type: cmdType,
+        unit_id: unitId,
+        target_position: pos,
+        parameters: params,
+        narrative: narrative,
+        reasoning: "manual_override",
+      }],
+      narrative_broadcast: "",
+      weather_command: "",
+      time_override: -1,
+    };
+    try {
+      const res = await fetch(`${serverUrl}/api/manual-command`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      setStatus(`\u2713 Queued ${data.command_count} command(s)`);
+      if (onSend) onSend();
+      setTimeout(() => setStatus(""), 3000);
+    } catch (e) {
+      setStatus(`\u2717 ${e.message}`);
+    }
+  };
+
+  const inputStyle = {
+    background: "rgba(0,255,136,0.05)",
+    border: "1px solid rgba(0,255,136,0.15)",
+    color: "#ccddcc",
+    padding: "6px 10px",
+    fontSize: 12,
+    fontFamily: "JetBrains Mono",
+    outline: "none",
+    width: "100%",
+    boxSizing: "border-box",
+  };
+
+  const labelStyle = { fontSize: 10, color: "#556655", letterSpacing: 1, fontFamily: "JetBrains Mono", marginBottom: 3, textTransform: "uppercase" };
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div>
+          <div style={labelStyle}>Command Type</div>
+          <select value={cmdType} onChange={(e) => setCmdType(e.target.value)} style={inputStyle}>
+            <optgroup label="Movement">
+              <option value="move">move</option>
+              <option value="attack">attack</option>
+              <option value="defend">defend</option>
+              <option value="patrol">patrol</option>
+              <option value="set_ambush">set_ambush</option>
+              <option value="seek_and_destroy">seek_and_destroy</option>
+              <option value="retreat">retreat</option>
+            </optgroup>
+            <optgroup label="Spawning">
+              <option value="spawn_infantry">spawn_infantry</option>
+              <option value="spawn_vehicle">spawn_vehicle</option>
+              <option value="spawn_reinforcements">spawn_reinforcements</option>
+            </optgroup>
+            <optgroup label="Environment">
+              <option value="set_weather">set_weather</option>
+              <option value="set_time">set_time</option>
+              <option value="set_wind">set_wind</option>
+              <option value="thunder_near">thunder_near</option>
+            </optgroup>
+            <optgroup label="Effects">
+              <option value="explosion">explosion</option>
+              <option value="smoke">smoke</option>
+              <option value="flare">flare</option>
+            </optgroup>
+            <optgroup label="Cleanup">
+              <option value="cleanup_area">cleanup_area</option>
+              <option value="cleanup_dead">cleanup_dead</option>
+              <option value="despawn_unit">despawn_unit</option>
+            </optgroup>
+            <optgroup label="Narrative">
+              <option value="radio_message">radio_message</option>
+              <option value="objective_create">objective_create</option>
+              <option value="objective_complete">objective_complete</option>
+            </optgroup>
+          </select>
+        </div>
+        <div>
+          <div style={labelStyle}>Parameters</div>
+          <input value={params} onChange={(e) => setParams(e.target.value)} style={inputStyle} placeholder="e.g. ussr_rifle_squad" />
+        </div>
+        <div>
+          <div style={labelStyle}>Target Position (x,y,z)</div>
+          <input value={pos} onChange={(e) => setPos(e.target.value)} style={inputStyle} placeholder="3500,0,4800" />
+        </div>
+        <div>
+          <div style={labelStyle}>Unit ID</div>
+          <input value={unitId} onChange={(e) => setUnitId(e.target.value)} style={inputStyle} placeholder="squad_1 or new" />
+        </div>
+        <div style={{ gridColumn: "span 2" }}>
+          <div style={labelStyle}>Narrative (optional)</div>
+          <input value={narrative} onChange={(e) => setNarrative(e.target.value)} style={inputStyle} placeholder="Flavor text shown to players" />
+        </div>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 10 }}>
+        <button
+          onClick={send}
+          style={{
+            background: "rgba(0,255,136,0.12)",
+            border: "1px solid rgba(0,255,136,0.3)",
+            color: "#00ff88",
+            padding: "8px 24px",
+            fontFamily: "JetBrains Mono",
+            fontSize: 12,
+            fontWeight: 600,
+            cursor: "pointer",
+            letterSpacing: 1,
+            textTransform: "uppercase",
+          }}
+        >
+          \u25b8 Send Command
+        </button>
+        {status && <span style={{ fontSize: 12, color: status.startsWith("\u2713") ? "#00ff88" : "#ff4444", fontFamily: "JetBrains Mono" }}>{status}</span>}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════
+// MAIN DASHBOARD
+// ═══════════════════════════════════════════════
+
+function Dashboard() {
+  const [health, setHealth] = useState(null);
+  const [gameState, setGameState] = useState(null);
+  const [commandLog, setCommandLog] = useState([]);
+  const [connected, setConnected] = useState(false);
+  const [tab, setTab] = useState("overview");
+  const serverUrl = API_BASE;
+  const logRef = useRef(null);
+
+  const fetchData = useCallback(async () => {
+    try {
+      const [hRes, gRes, cRes] = await Promise.all([
+        fetch(`${serverUrl}/health`).then((r) => r.json()),
+        fetch(`${serverUrl}/api/game-state`).then((r) => r.json()),
+        fetch(`${serverUrl}/api/command-log`).then((r) => r.json()),
+      ]);
+      setHealth(hRes);
+      setGameState(gRes);
+      setCommandLog(cRes.commands || []);
+      setConnected(true);
+    } catch {
+      setConnected(false);
+    }
+  }, [serverUrl]);
+
+  useEffect(() => {
+    fetchData();
+    const iv = setInterval(fetchData, POLL_INTERVAL);
+    return () => clearInterval(iv);
+  }, [fetchData]);
+
+  const state = gameState?.state || {};
+  const friendlyUnits = state.friendly_units || [];
+  const enemyUnits = state.enemy_units || [];
+  const players = state.players || [];
+  const events = state.recent_events || [];
+  const allCommands = commandLog.flatMap((c) => (c.commands?.commands || []).map((cmd) => ({ ...cmd, _ts: c.timestamp })));
+
+  const tabStyle = (t) => ({
+    padding: "8px 20px",
+    fontFamily: "JetBrains Mono",
+    fontSize: 11,
+    letterSpacing: 1.5,
+    textTransform: "uppercase",
+    cursor: "pointer",
+    background: tab === t ? "rgba(0,255,136,0.08)" : "transparent",
+    color: tab === t ? "#00ff88" : "#556655",
+    border: "none",
+    borderBottom: tab === t ? "2px solid #00ff88" : "2px solid transparent",
+    transition: "all 0.15s",
+  });
+
+  return (
+    <div
+      style={{
+        minHeight: "100vh",
+        background: "#0a0f0a",
+        color: "#ccddcc",
+        fontFamily: "Rajdhani, sans-serif",
+        padding: 0,
+      }}
+    >
+      {/* Header */}
+      <div
+        style={{
+          padding: "16px 24px",
+          borderBottom: "1px solid rgba(0,255,136,0.12)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          background: "rgba(0,255,136,0.02)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{ fontFamily: "Rajdhani", fontSize: 22, fontWeight: 700, color: "#00ff88", letterSpacing: 2 }}>
+            \u25c6 GOD MODE
+          </div>
+          <div style={{ fontSize: 11, color: "#445544", fontFamily: "JetBrains Mono", letterSpacing: 1 }}>
+            COMMAND & CONTROL
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 16, fontSize: 12, fontFamily: "JetBrains Mono" }}>
+          <StatusDot ok={connected} />
+          <span style={{ color: connected ? "#00ff88" : "#ff4444" }}>
+            {connected ? "CONNECTED" : "OFFLINE"}
+          </span>
+          {health && (
+            <span style={{ color: "#445544" }}>
+              {health.llm_provider?.toUpperCase()} / {health.model}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{ display: "flex", borderBottom: "1px solid rgba(0,255,136,0.08)", paddingLeft: 24 }}>
+        <button style={tabStyle("overview")} onClick={() => setTab("overview")}>Overview</button>
+        <button style={tabStyle("units")} onClick={() => setTab("units")}>Units</button>
+        <button style={tabStyle("commands")} onClick={() => setTab("commands")}>Command Log</button>
+        <button style={tabStyle("manual")} onClick={() => setTab("manual")}>Manual Control</button>
+      </div>
+
+      <div style={{ padding: "16px 24px", maxWidth: 1100 }}>
+        {/* OVERVIEW TAB */}
+        {tab === "overview" && (
+          <>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+              <StatCard label="Players" value={state.player_count ?? "\u2014"} sub={`${players.length} tracked`} />
+              <StatCard label="Mission Time" value={fmtTime(state.mission_time_seconds)} />
+              <StatCard label="OPFOR Squads" value={enemyUnits.length} sub={`of ${health?.model || "?"}`} accent="#ff8844" />
+              <StatCard label="BLUFOR Squads" value={friendlyUnits.length} accent="#4488ff" />
+              <StatCard label="Commands Sent" value={health?.total_commands_issued ?? "\u2014"} sub={`${health?.total_requests ?? 0} SITREPs`} />
+              <StatCard label="Errors" value={health?.total_errors ?? "\u2014"} accent={health?.total_errors > 0 ? "#ff4444" : "#00ff88"} />
+            </div>
+
+            <SectionHeader>Environment</SectionHeader>
+            <div style={{ display: "flex", gap: 24, fontSize: 13, fontFamily: "JetBrains Mono", flexWrap: "wrap" }}>
+              <div>Weather: <span style={{ color: "#00ff88" }}>{state.current_weather || "\u2014"}</span></div>
+              <div>Time: <span style={{ color: "#ffcc66" }}>{state.time_of_day ? `${Math.floor(state.time_of_day)}:${String(Math.floor((state.time_of_day % 1) * 60)).padStart(2, "0")}` : "\u2014"}</span></div>
+              <div>Wind: <span style={{ color: "#88bbff" }}>{fmt(state.wind_speed)} m/s @ {fmt(state.wind_direction)}\u00b0</span></div>
+            </div>
+
+            {state.current_objective && (
+              <>
+                <SectionHeader>Objective</SectionHeader>
+                <div style={{ fontSize: 13, fontFamily: "JetBrains Mono", color: "#aacc88" }}>
+                  {state.current_objective}
+                </div>
+              </>
+            )}
+
+            {events.length > 0 && (
+              <>
+                <SectionHeader>Recent Events</SectionHeader>
+                <div style={{ maxHeight: 150, overflowY: "auto", fontSize: 12, fontFamily: "JetBrains Mono" }}>
+                  {events.map((e, i) => (
+                    <div key={i} style={{ color: "#667766", padding: "2px 0", borderBottom: "1px solid rgba(0,255,136,0.04)" }}>
+                      <span style={{ color: "#445544", marginRight: 8 }}>\u25b8</span>{e}
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            <SectionHeader>Server Stats</SectionHeader>
+            <div style={{ fontSize: 12, fontFamily: "JetBrains Mono", color: "#556655", lineHeight: 1.8 }}>
+              <div>Uptime: {health ? fmtTime(health.uptime_seconds) : "\u2014"}</div>
+              <div>Input tokens: {health?.total_input_tokens?.toLocaleString() ?? "\u2014"} \u00b7 Output tokens: {health?.total_output_tokens?.toLocaleString() ?? "\u2014"}</div>
+              <div>Error rate: {health ? fmt(health.total_errors / Math.max(health.total_requests, 1) * 100) : "\u2014"}%</div>
+              {health?.glm_endpoint && <div>GLM endpoint: {health.glm_endpoint}</div>}
+            </div>
+          </>
+        )}
+
+        {/* UNITS TAB */}
+        {tab === "units" && (
+          <>
+            <SectionHeader>OPFOR Units ({enemyUnits.length})</SectionHeader>
+            {enemyUnits.length === 0 ? (
+              <div style={{ color: "#445544", fontSize: 12, fontFamily: "JetBrains Mono" }}>No OPFOR units tracked</div>
+            ) : (
+              enemyUnits.map((u, i) => <UnitRow key={i} unit={u} />)
+            )}
+
+            <SectionHeader>BLUFOR Units ({friendlyUnits.length})</SectionHeader>
+            {friendlyUnits.length === 0 ? (
+              <div style={{ color: "#445544", fontSize: 12, fontFamily: "JetBrains Mono" }}>No BLUFOR units tracked</div>
+            ) : (
+              friendlyUnits.map((u, i) => <UnitRow key={i} unit={u} />)
+            )}
+
+            <SectionHeader>Players ({players.length})</SectionHeader>
+            {players.length === 0 ? (
+              <div style={{ color: "#445544", fontSize: 12, fontFamily: "JetBrains Mono" }}>No players connected</div>
+            ) : (
+              players.map((p, i) => (
+                <div key={i} style={{ display: "flex", gap: 16, fontSize: 12, fontFamily: "JetBrains Mono", padding: "4px 0", borderBottom: "1px solid rgba(0,255,136,0.06)" }}>
+                  <span style={{ color: "#4488ff" }}>Player {p.player_id}</span>
+                  <span style={{ color: "#667766" }}>HP: {((p.health_pct || 0) * 100).toFixed(0)}%</span>
+                  <span style={{ color: "#556655" }}>{p.is_in_vehicle ? `In ${p.vehicle_type || "vehicle"}` : "On foot"}</span>
+                </div>
+              ))
+            )}
+          </>
+        )}
+
+        {/* COMMAND LOG TAB */}
+        {tab === "commands" && (
+          <>
+            <SectionHeader>Command History ({allCommands.length} commands)</SectionHeader>
+            <div ref={logRef} style={{ maxHeight: 500, overflowY: "auto" }}>
+              {allCommands.length === 0 ? (
+                <div style={{ color: "#445544", fontSize: 12, fontFamily: "JetBrains Mono" }}>No commands issued yet</div>
+              ) : (
+                [...allCommands].reverse().map((cmd, i) => <CommandEntry key={i} cmd={cmd} index={i} />)
+              )}
+            </div>
+          </>
+        )}
+
+        {/* MANUAL CONTROL TAB */}
+        {tab === "manual" && (
+          <>
+            <SectionHeader>Manual Command Injection</SectionHeader>
+            <div style={{ fontSize: 12, color: "#556655", fontFamily: "JetBrains Mono", marginBottom: 14 }}>
+              Send commands directly to the game, bypassing the LLM. Commands are merged into the next SITREP response.
+            </div>
+            <ManualCommandPanel onSend={fetchData} serverUrl={serverUrl} />
+
+            <SectionHeader>Quick Actions</SectionHeader>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {[
+                { label: "Storm", cmd: { command_type: "set_weather", parameters: "Storm" }, color: "#88bbff" },
+                { label: "Fog", cmd: { command_type: "set_weather", parameters: "Foggy" }, color: "#aaaaaa" },
+                { label: "Clear", cmd: { command_type: "set_weather", parameters: "Clear" }, color: "#ffcc66" },
+                { label: "Night", cmd: { command_type: "set_time", parameters: "22.5" }, color: "#6666aa" },
+                { label: "Dawn", cmd: { command_type: "set_time", parameters: "5.75" }, color: "#ff8844" },
+                { label: "Cleanup Dead", cmd: { command_type: "cleanup_dead", parameters: "" }, color: "#667766" },
+              ].map((q) => (
+                <button
+                  key={q.label}
+                  onClick={async () => {
+                    await fetch(`${serverUrl}/api/manual-command`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        commands: [{ ...q.cmd, unit_id: "", target_position: "0,0,0", narrative: "", reasoning: "quick_action" }],
+                        narrative_broadcast: "",
+                        weather_command: "",
+                        time_override: -1,
+                      }),
+                    });
+                    fetchData();
+                  }}
+                  style={{
+                    background: "transparent",
+                    border: `1px solid ${q.color}44`,
+                    color: q.color,
+                    padding: "6px 16px",
+                    fontFamily: "JetBrains Mono",
+                    fontSize: 11,
+                    cursor: "pointer",
+                    letterSpacing: 0.5,
+                  }}
+                >
+                  {q.label}
+                </button>
+              ))}
+            </div>
+
+            <SectionHeader>Mission Control</SectionHeader>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                onClick={async () => {
+                  await fetch(`${serverUrl}/api/reset`, { method: "POST" });
+                  fetchData();
+                }}
+                style={{
+                  background: "rgba(255,68,68,0.08)",
+                  border: "1px solid rgba(255,68,68,0.25)",
+                  color: "#ff4444",
+                  padding: "8px 20px",
+                  fontFamily: "JetBrains Mono",
+                  fontSize: 11,
+                  cursor: "pointer",
+                  letterSpacing: 1,
+                  textTransform: "uppercase",
+                }}
+              >
+                \u27f3 Reset Mission
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Footer */}
+      <div
+        style={{
+          position: "fixed",
+          bottom: 0,
+          left: 0,
+          right: 0,
+          padding: "6px 24px",
+          background: "#0a0f0a",
+          borderTop: "1px solid rgba(0,255,136,0.08)",
+          display: "flex",
+          justifyContent: "space-between",
+          fontSize: 10,
+          fontFamily: "JetBrains Mono",
+          color: "#334433",
+        }}
+      >
+        <span>SITREP age: {gameState?.age_seconds ? `${fmt(gameState.age_seconds)}s` : "\u2014"}</span>
+        <span>Polling every {POLL_INTERVAL / 1000}s</span>
+        <span>{new Date().toLocaleTimeString()}</span>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Dashboard />);
+</script>
+</body>
+</html>

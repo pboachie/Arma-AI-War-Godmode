@@ -49,8 +49,12 @@ case "$PROVIDER" in
         echo "  Provider: Z.AI GLM (Coding)"
         echo "  Endpoint: ${GLM_BASE_URL:-https://api.z.ai/api/coding/paas/v4/}"
         ;;
+    ollama)
+        echo "  Provider: Ollama (local)"
+        echo "  Endpoint: ${OLLAMA_BASE_URL:-http://localhost:11434}"
+        ;;
     *)
-        echo "ERROR: Unknown LLM_PROVIDER '$PROVIDER'. Use: anthropic, openai, or glm"
+        echo "ERROR: Unknown LLM_PROVIDER '$PROVIDER'. Use: anthropic, openai, glm, or ollama"
         exit 1
         ;;
 esac
@@ -64,8 +68,15 @@ fi
 echo "═══════════════════════════════════════════════"
 echo "  Starting God Mode Middleware Server"
 echo "  Model:    ${LLM_MODEL:-auto}"
-echo "  URL:      http://0.0.0.0:8000"
+echo "  API:      http://0.0.0.0:8000"
+echo "  Dashboard: http://localhost:8000/dashboard"
 echo "═══════════════════════════════════════════════"
 echo ""
 
-uvicorn server:app --host 0.0.0.0 --port 8000 --reload
+RELOAD_FLAG=""
+if [ "${DEV_MODE:-}" = "1" ] || [ "${DEV_MODE:-}" = "true" ]; then
+    RELOAD_FLAG="--reload"
+    echo "  Dev mode: auto-reload enabled"
+fi
+
+uvicorn server:app --host 0.0.0.0 --port 8000 $RELOAD_FLAG

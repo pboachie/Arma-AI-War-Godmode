@@ -4,3 +4,9 @@ anthropic>=0.40.0
 openai>=1.50.0
 pydantic>=2.5.0
 requests>=2.31.0
+
+# ── LangChain (memory, chains, structured output, fallbacks) ──
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-openai>=0.3.0
+langchain-anthropic>=0.3.0

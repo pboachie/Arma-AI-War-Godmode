@@ -474,7 +474,15 @@ async def call_llm(user_message: str) -> str:
                     response.usage, "completion_tokens", 0
                 )
 
-        return response.choices[0].message.content
+        content = response.choices[0].message.content if response.choices else None
+        if not content:
+            log.warning(
+                "LLM returned empty content | finish_reason=%s | choices=%d",
+                getattr(response.choices[0], "finish_reason", "?") if response.choices else "no_choices",
+                len(response.choices) if response.choices else 0,
+            )
+            return "{}"
+        return content
 
     raise ValueError(f"Unknown provider: {LLM_PROVIDER}")
 

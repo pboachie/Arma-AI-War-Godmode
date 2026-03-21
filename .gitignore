@@ -3,9 +3,12 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+*.egg-info/
+.pytest_cache/
 
-# Environment
+# Environment (contains API keys)
 .env
+!.env.example
 
 # IDE
 .vscode/
@@ -19,7 +22,16 @@ Thumbs.db
 *.ebo
 *.log
 
-# Arma Reforger Server binaries
+# Arma Reforger Server - ignore binaries but keep configs
 Arma Reforger Server/
+!Arma Reforger Server/configs/
+!Arma Reforger Server/configs/**
+
+# Middleware runtime data
 battle_history/
 replays/
+middleware/battle_history/
+middleware/replays/
+
+# Docker
+*.pid

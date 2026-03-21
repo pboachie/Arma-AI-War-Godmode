@@ -15,9 +15,26 @@ class GM_CleanupEntry
     }
 }
 
+// ID-based cleanup entry — stores entity ID instead of raw reference
+// to prevent access violations when entities are deleted before cleanup fires
+class GM_CleanupEntryById
+{
+    int entityId;
+    float cleanupTime;
+    int retryCount;
+
+    void GM_CleanupEntryById(int id, float time)
+    {
+        entityId = id;
+        cleanupTime = time;
+        retryCount = 0;
+    }
+}
+
 class GM_CleanupSystem
 {
     protected ref array<ref GM_CleanupEntry> m_aCleanupQueue;
+    protected ref array<ref GM_CleanupEntryById> m_aCleanupByIdQueue;
     protected float m_fGameTime = 0;
 
     // Configurable limits
@@ -31,6 +48,7 @@ class GM_CleanupSystem
     void GM_CleanupSystem()
     {
         m_aCleanupQueue = {};
+        m_aCleanupByIdQueue = {};
     }
 
     // ═══════════════════════════════════════════════
@@ -44,6 +62,18 @@ class GM_CleanupSystem
         float cleanupAt = m_fGameTime + delaySeconds;
         m_aCleanupQueue.Insert(new GM_CleanupEntry(entity, cleanupAt));
         Print("[GodMode:Cleanup] Scheduled entity for cleanup in " + delaySeconds + "s");
+    }
+
+    // ID-based scheduling — stores entity ID instead of raw reference.
+    // Prevents access violations when the engine deletes the entity
+    // before the cleanup timer fires.
+    void ScheduleCleanupById(int entityId, float delaySeconds)
+    {
+        if (entityId == 0) return;
+
+        float cleanupAt = m_fGameTime + delaySeconds;
+        m_aCleanupByIdQueue.Insert(new GM_CleanupEntryById(entityId, cleanupAt));
+        Print("[GodMode:Cleanup] Scheduled entity ID " + entityId + " for cleanup in " + delaySeconds + "s");
     }
 
     // ═══════════════════════════════════════════════
@@ -99,8 +129,52 @@ class GM_CleanupSystem
             cleaned++;
         }
 
+        // Process ID-based cleanup queue
+        for (int j = m_aCleanupByIdQueue.Count() - 1; j >= 0; j--)
+        {
+            if (cleaned >= MAX_CLEANUP_PER_PASS) break;
+
+            GM_CleanupEntryById idEntry = m_aCleanupByIdQueue[j];
+
+            // Not yet time
+            if (m_fGameTime < idEntry.cleanupTime)
+                continue;
+
+            // Look up entity by ID — if already gone, silently discard
+            IEntity resolvedEntity = GetGame().GetWorld().FindEntityByID(idEntry.entityId);
+            if (!resolvedEntity)
+            {
+                m_aCleanupByIdQueue.Remove(j);
+                continue;
+            }
+
+            // Check player proximity
+            if (IsPlayerNearby(resolvedEntity.GetOrigin(), PLAYER_SAFE_RADIUS))
+            {
+                idEntry.retryCount++;
+                if (idEntry.retryCount >= MAX_RETRY_COUNT)
+                {
+                    SCR_EntityHelper.DeleteEntityAndChildren(resolvedEntity);
+                    m_aCleanupByIdQueue.Remove(j);
+                    cleaned++;
+                    Print("[GodMode:Cleanup] Force-cleaned entity ID " + idEntry.entityId + " after max retries");
+                }
+                else
+                {
+                    idEntry.cleanupTime = m_fGameTime + RETRY_DELAY;
+                }
+                continue;
+            }
+
+            // Safe to delete
+            SCR_EntityHelper.DeleteEntityAndChildren(resolvedEntity);
+            m_aCleanupByIdQueue.Remove(j);
+            cleaned++;
+        }
+
+        int totalRemaining = m_aCleanupQueue.Count() + m_aCleanupByIdQueue.Count();
         if (cleaned > 0)
-            Print("[GodMode:Cleanup] Pass complete: " + cleaned + " entities cleaned, " + m_aCleanupQueue.Count() + " remaining");
+            Print("[GodMode:Cleanup] Pass complete: " + cleaned + " entities cleaned, " + totalRemaining + " remaining");
     }
 
     // ═══════════════════════════════════════════════
@@ -190,5 +264,5 @@ class GM_CleanupSystem
     // Status
     // ═══════════════════════════════════════════════
 
-    int GetQueueSize() { return m_aCleanupQueue.Count(); }
+    int GetQueueSize() { return m_aCleanupQueue.Count() + m_aCleanupByIdQueue.Count(); }
 }

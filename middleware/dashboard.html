@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>God Mode — Command & Control</title>
+<link rel="icon" href='data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"%3E%3Crect width="64" height="64" rx="12" fill="%230a0f0a"/%3E%3Cpath d="M32 10 50 24v16L32 54 14 40V24z" fill="none" stroke="%2300ff88" stroke-width="4"/%3E%3Ccircle cx="32" cy="32" r="6" fill="%2300ff88"/%3E%3C/svg%3E'>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -20,6 +21,10 @@
   ::-webkit-scrollbar-thumb { background: rgba(0,255,136,0.15); border-radius: 3px; }
   ::-webkit-scrollbar-thumb:hover { background: rgba(0,255,136,0.3); }
   ::selection { background: rgba(0,255,136,0.2); color: #ccddcc; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
 </style>
 </head>
 <body>
@@ -29,6 +34,7 @@ const { useState, useEffect, useCallback, useRef } = React;
 
 const API_BASE = window.location.origin;
 const POLL_INTERVAL = 3000;
+const STATUS_TIMEOUT = 3200;
 
 // ── Utility ──
 const fmt = (n) => (typeof n === "number" ? n.toFixed(1) : "\u2014");
@@ -50,7 +56,13 @@ const ts = (epoch) => {
 // COMPONENTS
 // ═══════════════════════════════════════════════
 
-function StatusDot({ ok }) {
+function StatusDot({ state }) {
+  const palette = {
+    connected: { fill: "#00ff88", glow: "#00ff8866" },
+    connecting: { fill: "#ffcc66", glow: "#ffcc6666" },
+    offline: { fill: "#ff4444", glow: "#ff444466" },
+  };
+  const tone = palette[state] || palette.offline;
   return (
     <span
       style={{
@@ -58,8 +70,8 @@ function StatusDot({ ok }) {
         width: 8,
         height: 8,
         borderRadius: "50%",
-        background: ok ? "#00ff88" : "#ff4444",
-        boxShadow: ok ? "0 0 6px #00ff8866" : "0 0 6px #ff444466",
+        background: tone.fill,
+        boxShadow: `0 0 6px ${tone.glow}`,
         marginRight: 8,
       }}
     />
@@ -108,33 +120,440 @@ function SectionHeader({ children }) {
   );
 }
 
+function ActionStatus({ status }) {
+  if (!status) return null;
+
+  const tones = {
+    success: {
+      color: "#00ff88",
+      background: "rgba(0,255,136,0.08)",
+      border: "1px solid rgba(0,255,136,0.18)",
+    },
+    error: {
+      color: "#ff6666",
+      background: "rgba(255,68,68,0.08)",
+      border: "1px solid rgba(255,68,68,0.22)",
+    },
+    info: {
+      color: "#88bbff",
+      background: "rgba(136,187,255,0.08)",
+      border: "1px solid rgba(136,187,255,0.18)",
+    },
+  };
+
+  const tone = tones[status.type] || tones.info;
+
+  return (
+    <div
+      style={{
+        marginTop: 12,
+        padding: "8px 10px",
+        fontSize: 11,
+        fontFamily: "JetBrains Mono",
+        lineHeight: 1.4,
+        ...tone,
+      }}
+    >
+      {status.message}
+    </div>
+  );
+}
+
+// ── LLM Health Indicator ──
+function LLMHealthIndicator({ statsData }) {
+  if (!statsData) return null;
+
+  const retries = statsData.llm_retries || 0;
+  const rate429 = statsData.llm_429s || 0;
+  const circuitStatus = statsData.llm_circuit_status || "closed";
+  const inflight = statsData.llm_inflight || 0;
+  const maxConcurrent = statsData.llm_max_concurrent || 1;
+  const consecutiveFailures = statsData.llm_consecutive_failures || 0;
+
+  // Determine overall health: green/yellow/red
+  let healthState = "healthy";
+  let healthColor = "#00ff88";
+  let healthGlow = "#00ff8844";
+  let healthLabel = "HEALTHY";
+
+  if (circuitStatus === "open") {
+    healthState = "critical";
+    healthColor = "#ff4444";
+    healthGlow = "#ff444444";
+    healthLabel = "CIRCUIT OPEN";
+  } else if (circuitStatus === "half-open") {
+    healthState = "recovering";
+    healthColor = "#ffaa00";
+    healthGlow = "#ffaa0044";
+    healthLabel = "RECOVERING";
+  } else if (consecutiveFailures > 0 || retries > 0) {
+    healthState = "degraded";
+    healthColor = "#ffcc66";
+    healthGlow = "#ffcc6644";
+    healthLabel = "RETRYING";
+  }
+
+  return (
+    <div
+      style={{
+        background: "rgba(0,255,136,0.03)",
+        border: `1px solid ${healthColor}33`,
+        padding: "14px 18px",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+        <span
+          style={{
+            display: "inline-block",
+            width: 10,
+            height: 10,
+            borderRadius: "50%",
+            background: healthColor,
+            boxShadow: `0 0 8px ${healthGlow}`,
+            animation: healthState !== "healthy" ? "pulse 1.5s ease-in-out infinite" : "none",
+          }}
+        />
+        <span style={{ fontSize: 11, letterSpacing: 1.5, fontFamily: "JetBrains Mono", color: healthColor, textTransform: "uppercase", fontWeight: 600 }}>
+          LLM {healthLabel}
+        </span>
+      </div>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 11, fontFamily: "JetBrains Mono", color: "#667766" }}>
+        <div>
+          Retries: <span style={{ color: retries > 0 ? "#ffcc66" : "#556655" }}>{retries}</span>
+        </div>
+        <div>
+          429s: <span style={{ color: rate429 > 0 ? "#ff8844" : "#556655" }}>{rate429}</span>
+        </div>
+        <div>
+          Circuit: <span style={{ color: circuitStatus === "closed" ? "#00ff88" : circuitStatus === "open" ? "#ff4444" : "#ffaa00" }}>{circuitStatus}</span>
+        </div>
+        <div>
+          In-flight: <span style={{ color: "#88bbff" }}>{inflight}/{maxConcurrent}</span>
+        </div>
+        {consecutiveFailures > 0 && (
+          <div>
+            Consecutive fails: <span style={{ color: "#ff4444" }}>{consecutiveFailures}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Response Time Sparkline (CSS-only) ──
+function ResponseTimeSparkline({ times }) {
+  if (!times || times.length === 0) {
+    return (
+      <div style={{ fontSize: 11, fontFamily: "JetBrains Mono", color: "#445544" }}>
+        No response time data yet
+      </div>
+    );
+  }
+
+  const maxVal = Math.max(...times, 1);
+  const minVal = Math.min(...times);
+  const avgVal = times.reduce((a, b) => a + b, 0) / times.length;
+  const latest = times[times.length - 1];
+
+  // Color the latest bar based on trend: compare to average
+  const trendColor = latest > avgVal * 1.5 ? "#ff4444" : latest > avgVal * 1.1 ? "#ffcc66" : "#00ff88";
+
+  return (
+    <div style={{
+      background: "rgba(0,255,136,0.03)",
+      border: "1px solid rgba(0,255,136,0.12)",
+      padding: "14px 18px",
+    }}>
+      <div style={{ fontSize: 11, color: "#667766", letterSpacing: 1.5, fontFamily: "JetBrains Mono", textTransform: "uppercase", marginBottom: 8 }}>
+        Response Time Trend
+      </div>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 40 }}>
+        {times.map((t, i) => {
+          const heightPct = Math.max((t / maxVal) * 100, 4);
+          const isLatest = i === times.length - 1;
+          const barColor = isLatest ? trendColor : "rgba(0,255,136,0.35)";
+          return (
+            <div
+              key={i}
+              title={`${t}ms`}
+              style={{
+                flex: 1,
+                height: `${heightPct}%`,
+                background: barColor,
+                borderRadius: "1px 1px 0 0",
+                minWidth: 6,
+                transition: "height 0.3s ease",
+              }}
+            />
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 10, fontFamily: "JetBrains Mono", color: "#556655" }}>
+        <span>min: <span style={{ color: "#889988" }}>{minVal}ms</span></span>
+        <span>avg: <span style={{ color: "#889988" }}>{Math.round(avgVal)}ms</span></span>
+        <span>latest: <span style={{ color: trendColor }}>{latest}ms</span></span>
+      </div>
+    </div>
+  );
+}
+
+// ── Error Rate Display ──
+function ErrorRateDisplay({ health }) {
+  if (!health) return null;
+
+  const totalReqs = health.total_requests || 0;
+  const totalErrs = health.total_errors || 0;
+  const errorRate = totalReqs > 0 ? (totalErrs / totalReqs) * 100 : 0;
+
+  let rateColor = "#00ff88";
+  let rateLabel = "NOMINAL";
+  let rateBg = "rgba(0,255,136,0.06)";
+  let rateBorder = "rgba(0,255,136,0.20)";
+
+  if (errorRate > 10) {
+    rateColor = "#ff4444";
+    rateLabel = "CRITICAL";
+    rateBg = "rgba(255,68,68,0.06)";
+    rateBorder = "rgba(255,68,68,0.25)";
+  } else if (errorRate >= 5) {
+    rateColor = "#ffcc66";
+    rateLabel = "ELEVATED";
+    rateBg = "rgba(255,204,102,0.06)";
+    rateBorder = "rgba(255,204,102,0.25)";
+  }
+
+  return (
+    <div style={{
+      background: rateBg,
+      border: `1px solid ${rateBorder}`,
+      padding: "14px 18px",
+      flex: 1,
+      minWidth: 140,
+    }}>
+      <div style={{ fontSize: 11, color: "#667766", letterSpacing: 1.5, fontFamily: "JetBrains Mono", textTransform: "uppercase" }}>
+        Error Rate
+      </div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginTop: 2 }}>
+        <span style={{ fontSize: 28, fontWeight: 700, color: rateColor, fontFamily: "Rajdhani", lineHeight: 1 }}>
+          {errorRate.toFixed(1)}%
+        </span>
+        <span style={{ fontSize: 10, fontFamily: "JetBrains Mono", color: rateColor, letterSpacing: 1, textTransform: "uppercase" }}>
+          {rateLabel}
+        </span>
+      </div>
+      <div style={{ fontSize: 11, color: "#556655", fontFamily: "JetBrains Mono", marginTop: 4 }}>
+        {totalErrs} errors / {totalReqs} requests
+      </div>
+      {/* Error rate progress bar */}
+      <div style={{ marginTop: 6, background: "rgba(0,255,136,0.08)", height: 4, borderRadius: 2, overflow: "hidden" }}>
+        <div style={{
+          width: `${Math.min(errorRate, 100)}%`,
+          height: "100%",
+          background: rateColor,
+          borderRadius: 2,
+          transition: "width 0.3s ease",
+        }} />
+      </div>
+    </div>
+  );
+}
+
+// ── Command Execution Log (recent 20) ──
+function CommandExecutionLog({ commandLog }) {
+  const logEndRef = useRef(null);
+  const containerRef = useRef(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const prevCountRef = useRef(0);
+
+  // Flatten and take last 20 commands
+  const recentCommands = [];
+  for (let i = commandLog.length - 1; i >= 0 && recentCommands.length < 20; i--) {
+    const batch = commandLog[i];
+    const cmds = (batch.commands?.commands || []).map((cmd) => ({
+      ...cmd,
+      _ts: batch.timestamp,
+      _source: batch.source || "llm",
+      _response_time_ms: batch.response_time_ms,
+    }));
+    for (let j = cmds.length - 1; j >= 0 && recentCommands.length < 20; j--) {
+      recentCommands.unshift(cmds[j]);
+    }
+  }
+
+  // Auto-scroll on new entries
+  useEffect(() => {
+    if (autoScroll && recentCommands.length > prevCountRef.current && logEndRef.current) {
+      logEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+    prevCountRef.current = recentCommands.length;
+  }, [recentCommands.length, autoScroll]);
+
+  // Detect manual scroll
+  const handleScroll = useCallback(() => {
+    if (!containerRef.current) return;
+    const el = containerRef.current;
+    const isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+    setAutoScroll(isAtBottom);
+  }, []);
+
+  // Color mapping by command category
+  const getTypeColor = (type) => {
+    if (!type) return "#667766";
+    const t = type.toLowerCase();
+    // Spawn commands: blue
+    if (t.includes("spawn") || t.includes("reinforcement")) return "#4488ff";
+    // Combat commands: red
+    if (t === "attack" || t === "defend" || t === "set_ambush" || t === "seek_and_destroy") return "#ff4444";
+    // Movement commands: green
+    if (t === "move" || t === "patrol" || t === "retreat") return "#00ff88";
+    // Effects commands: yellow
+    if (t === "explosion" || t === "smoke" || t === "flare" || t === "thunder_near") return "#ffcc66";
+    // Environment
+    if (t.includes("weather") || t.includes("time") || t.includes("wind")) return "#88ddff";
+    // Cleanup
+    if (t.includes("cleanup") || t.includes("despawn")) return "#889988";
+    return "#667766";
+  };
+
+  const getCategoryLabel = (type) => {
+    if (!type) return "";
+    const t = type.toLowerCase();
+    if (t.includes("spawn") || t.includes("reinforcement")) return "SPAWN";
+    if (t === "attack" || t === "defend" || t === "set_ambush" || t === "seek_and_destroy") return "COMBAT";
+    if (t === "move" || t === "patrol" || t === "retreat") return "MOVE";
+    if (t === "explosion" || t === "smoke" || t === "flare" || t === "thunder_near") return "EFFECT";
+    if (t.includes("weather") || t.includes("time") || t.includes("wind")) return "ENV";
+    if (t.includes("cleanup") || t.includes("despawn")) return "CLEAN";
+    return "OTHER";
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <span style={{ fontSize: 10, fontFamily: "JetBrains Mono", color: "#556655" }}>
+          Showing last {recentCommands.length} of 20 max
+        </span>
+        <span style={{
+          fontSize: 9, fontFamily: "JetBrains Mono",
+          color: autoScroll ? "#00ff88" : "#556655",
+          letterSpacing: 0.5,
+        }}>
+          {autoScroll ? "AUTO-SCROLL ON" : "AUTO-SCROLL OFF"}
+        </span>
+      </div>
+      <div
+        ref={containerRef}
+        onScroll={handleScroll}
+        style={{
+          maxHeight: 320,
+          overflowY: "auto",
+          border: "1px solid rgba(0,255,136,0.10)",
+          background: "rgba(0,0,0,0.2)",
+        }}
+      >
+        {recentCommands.length === 0 ? (
+          <div style={{ color: "#445544", fontSize: 12, fontFamily: "JetBrains Mono", padding: "16px 12px", textAlign: "center" }}>
+            No commands executed yet
+          </div>
+        ) : (
+          recentCommands.map((cmd, i) => {
+            const typeColor = getTypeColor(cmd.command_type);
+            const catLabel = getCategoryLabel(cmd.command_type);
+            const narrative = cmd.narrative || "";
+            const truncNarrative = narrative.length > 60 ? narrative.slice(0, 57) + "..." : narrative;
+            const posStr = cmd.target_position
+              ? (typeof cmd.target_position === "string" ? cmd.target_position : JSON.stringify(cmd.target_position))
+              : "";
+
+            return (
+              <div
+                key={i}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "5px 10px",
+                  borderBottom: "1px solid rgba(0,255,136,0.05)",
+                  fontSize: 11,
+                  fontFamily: "JetBrains Mono",
+                  borderLeft: `3px solid ${typeColor}`,
+                }}
+              >
+                <span style={{ color: "#445544", width: 62, flexShrink: 0, fontSize: 10 }}>{ts(cmd._ts)}</span>
+                <span style={{
+                  fontSize: 8, padding: "1px 4px", letterSpacing: 0.5, fontWeight: 600,
+                  background: `${typeColor}18`, color: typeColor, border: `1px solid ${typeColor}44`,
+                  width: 48, textAlign: "center", flexShrink: 0,
+                }}>
+                  {catLabel}
+                </span>
+                <span style={{ color: typeColor, width: 120, flexShrink: 0, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {cmd.command_type}
+                </span>
+                <span style={{ color: "#667766", width: 70, flexShrink: 0 }}>{cmd.unit_id || "\u2014"}</span>
+                <span style={{ color: "#556655", width: 100, flexShrink: 0, fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {posStr || "\u2014"}
+                </span>
+                <span style={{ color: "#556655", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10, fontStyle: "italic" }}>
+                  {truncNarrative || "\u2014"}
+                </span>
+              </div>
+            );
+          })
+        )}
+        <div ref={logEndRef} />
+      </div>
+    </div>
+  );
+}
+
 function UnitRow({ unit }) {
   const hp = (unit.health_pct || 0) * 100;
   const hpColor = hp > 60 ? "#00ff88" : hp > 30 ? "#ffaa00" : "#ff4444";
   const orderColors = { patrol: "#00ff88", defend: "#ffaa00", attack: "#ff4444", move: "#00aaff" };
   const orderColor = orderColors[unit.current_order] || "#667766";
   const pos = Array.isArray(unit.position) ? `${unit.position[0]}, ${unit.position[2]}` : "\u2014";
+  const statusColors = { completed: "#00ff88", executing: "#00aaff", stuck: "#ff4444", engaged: "#ffaa00" };
+  const oStatus = unit.order_status || null;
+  const oStatusColor = statusColors[oStatus] || "#556655";
   return (
     <div
       style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
         padding: "6px 0",
         borderBottom: "1px solid rgba(0,255,136,0.06)",
         fontSize: 12,
         fontFamily: "JetBrains Mono",
       }}
     >
-      <span style={{ color: "#00ff88", width: 80, flexShrink: 0 }}>{unit.unit_id}</span>
-      <span style={{ color: "#889988", width: 100, flexShrink: 0 }}>{unit.unit_type}</span>
-      <span style={{ color: orderColor, flexShrink: 0, fontSize: 11 }}>{unit.current_order || "\u2014"}</span>
-      <span style={{ color: "#667766", width: 50, flexShrink: 0 }}>str:{unit.strength || "?"}</span>
-      <span style={{ color: "#556655", width: 120, flexShrink: 0, fontSize: 11 }}>{pos}</span>
-      <div style={{ flex: 1, background: "rgba(0,255,136,0.08)", height: 4, borderRadius: 2, overflow: "hidden" }}>
-        <div style={{ width: `${hp}%`, height: "100%", background: hpColor, borderRadius: 2 }} />
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ color: "#00ff88", width: 80, flexShrink: 0 }}>{unit.unit_id}</span>
+        <span style={{ color: "#889988", width: 100, flexShrink: 0 }}>{unit.unit_type}</span>
+        <span style={{ color: orderColor, flexShrink: 0, fontSize: 11, width: 70 }}>{unit.current_order || "\u2014"}</span>
+        <span style={{ color: "#667766", width: 50, flexShrink: 0 }}>str:{unit.strength || "?"}</span>
+        <span style={{ color: "#556655", width: 120, flexShrink: 0, fontSize: 11 }}>{pos}</span>
+        <div style={{ flex: 1, background: "rgba(0,255,136,0.08)", height: 4, borderRadius: 2, overflow: "hidden" }}>
+          <div style={{ width: `${hp}%`, height: "100%", background: hpColor, borderRadius: 2 }} />
+        </div>
+        <span style={{ color: hpColor, width: 40, textAlign: "right", flexShrink: 0 }}>{hp.toFixed(0)}%</span>
       </div>
-      <span style={{ color: hpColor, width: 40, textAlign: "right", flexShrink: 0 }}>{hp.toFixed(0)}%</span>
+      {/* Extended unit info row */}
+      <div style={{ display: "flex", gap: 16, paddingLeft: 80, marginTop: 2, fontSize: 10, color: "#556655" }}>
+        {oStatus && (
+          <span>status: <span style={{ color: oStatusColor }}>{oStatus}</span></span>
+        )}
+        {unit.distance_to_objective != null && (
+          <span>obj dist: <span style={{ color: "#88bbff" }}>{Math.round(unit.distance_to_objective)}m</span></span>
+        )}
+        {unit.time_since_order != null && (
+          <span>order age: <span style={{ color: "#889988" }}>{fmtTime(unit.time_since_order)}</span></span>
+        )}
+        {(unit.kills != null || unit.casualties != null) && (
+          <span>
+            {unit.kills != null && <><span style={{ color: "#ff4444" }}>{unit.kills}K</span> </>}
+            {unit.casualties != null && <span style={{ color: "#ffaa00" }}>{unit.casualties}C</span>}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -187,13 +606,20 @@ function CommandEntry({ cmd, index }) {
 // MANUAL COMMAND PANEL
 // ═══════════════════════════════════════════════
 
-function ManualCommandPanel({ onSend, serverUrl }) {
+function ManualCommandPanel({ queueCommand, busy }) {
   const [cmdType, setCmdType] = useState("spawn_infantry");
   const [params, setParams] = useState("ussr_rifle_squad");
   const [pos, setPos] = useState("3500,0,4800");
   const [unitId, setUnitId] = useState("new");
   const [narrative, setNarrative] = useState("");
   const [status, setStatus] = useState("");
+  const statusTimerRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
+    };
+  }, []);
 
   const send = async () => {
     const body = {
@@ -210,17 +636,14 @@ function ManualCommandPanel({ onSend, serverUrl }) {
       time_override: -1,
     };
     try {
-      const res = await fetch(`${serverUrl}/api/manual-command`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
+      const data = await queueCommand(body, { busyKey: "manual" });
       setStatus(`\u2713 Queued ${data.command_count} command(s)`);
-      if (onSend) onSend();
-      setTimeout(() => setStatus(""), 3000);
+      if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
+      statusTimerRef.current = setTimeout(() => setStatus(""), STATUS_TIMEOUT);
     } catch (e) {
       setStatus(`\u2717 ${e.message}`);
+      if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
+      statusTimerRef.current = setTimeout(() => setStatus(""), STATUS_TIMEOUT);
     }
   };
 
@@ -301,6 +724,7 @@ function ManualCommandPanel({ onSend, serverUrl }) {
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 10 }}>
         <button
           onClick={send}
+          disabled={busy}
           style={{
             background: "rgba(0,255,136,0.12)",
             border: "1px solid rgba(0,255,136,0.3)",
@@ -309,12 +733,13 @@ function ManualCommandPanel({ onSend, serverUrl }) {
             fontFamily: "JetBrains Mono",
             fontSize: 12,
             fontWeight: 600,
-            cursor: "pointer",
+            cursor: busy ? "wait" : "pointer",
             letterSpacing: 1,
             textTransform: "uppercase",
+            opacity: busy ? 0.6 : 1,
           }}
         >
-          \u25b8 Send Command
+          {busy ? "… Sending" : "\u25b8 Send Command"}
         </button>
         {status && <span style={{ fontSize: 12, color: status.startsWith("\u2713") ? "#00ff88" : "#ff4444", fontFamily: "JetBrains Mono" }}>{status}</span>}
       </div>
@@ -330,26 +755,117 @@ function Dashboard() {
   const [health, setHealth] = useState(null);
   const [gameState, setGameState] = useState(null);
   const [commandLog, setCommandLog] = useState([]);
+  const [statsData, setStatsData] = useState(null);
+  const [tacticalIntel, setTacticalIntel] = useState(null);
   const [connected, setConnected] = useState(false);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [tab, setTab] = useState("overview");
+  const [actionStatus, setActionStatus] = useState(null);
+  const [busyAction, setBusyAction] = useState("");
   const serverUrl = API_BASE;
   const logRef = useRef(null);
+  const actionStatusTimerRef = useRef(null);
+
+  const showActionStatus = useCallback((type, message) => {
+    if (actionStatusTimerRef.current) clearTimeout(actionStatusTimerRef.current);
+    setActionStatus({ type, message });
+    actionStatusTimerRef.current = setTimeout(() => setActionStatus(null), STATUS_TIMEOUT);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (actionStatusTimerRef.current) clearTimeout(actionStatusTimerRef.current);
+    };
+  }, []);
+
+  const fetchJson = useCallback(async (path, options) => {
+    const res = await fetch(`${serverUrl}${path}`, options);
+    const contentType = res.headers.get("content-type") || "";
+    const payload = contentType.includes("application/json") ? await res.json() : { detail: await res.text() };
+    if (!res.ok) {
+      throw new Error(payload?.detail || `Request failed (${res.status})`);
+    }
+    return payload;
+  }, [serverUrl]);
 
   const fetchData = useCallback(async () => {
     try {
-      const [hRes, gRes, cRes] = await Promise.all([
-        fetch(`${serverUrl}/health`).then((r) => r.json()),
-        fetch(`${serverUrl}/api/game-state`).then((r) => r.json()),
-        fetch(`${serverUrl}/api/command-log`).then((r) => r.json()),
+      const [hRes, gRes, cRes, sRes, tRes] = await Promise.all([
+        fetchJson("/health"),
+        fetchJson("/api/game-state"),
+        fetchJson("/api/command-log"),
+        fetchJson("/stats").catch(() => null),
+        fetchJson("/api/tactical-intel").catch(() => null),
       ]);
       setHealth(hRes);
       setGameState(gRes);
       setCommandLog(cRes.commands || []);
+      if (sRes) setStatsData(sRes);
+      if (tRes) setTacticalIntel(tRes);
       setConnected(true);
+      setHasLoadedOnce(true);
     } catch {
       setConnected(false);
+      setHasLoadedOnce(true);
     }
-  }, [serverUrl]);
+  }, [fetchJson]);
+
+  const queueCommand = useCallback(async (body, { busyKey = "manual" } = {}) => {
+    setBusyAction(busyKey);
+    try {
+      const data = await fetchJson("/api/manual-command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      await fetchData();
+      return data;
+    } finally {
+      setBusyAction("");
+    }
+  }, [fetchData, fetchJson]);
+
+  const quickActions = [
+    { label: "Storm", cmd: { command_type: "set_weather", parameters: "Storm" }, color: "#88bbff" },
+    { label: "Fog", cmd: { command_type: "set_weather", parameters: "Foggy" }, color: "#aaaaaa" },
+    { label: "Clear", cmd: { command_type: "set_weather", parameters: "Clear" }, color: "#ffcc66" },
+    { label: "Night", cmd: { command_type: "set_time", parameters: "22.5" }, color: "#6666aa" },
+    { label: "Dawn", cmd: { command_type: "set_time", parameters: "5.75" }, color: "#ff8844" },
+    { label: "Cleanup Dead", cmd: { command_type: "cleanup_dead", parameters: "" }, color: "#667766" },
+  ];
+
+  const queueQuickAction = useCallback(async (quickAction) => {
+    try {
+      const data = await queueCommand({
+        commands: [{ ...quickAction.cmd, unit_id: "", target_position: "0,0,0", narrative: "", reasoning: "quick_action" }],
+        narrative_broadcast: "",
+        weather_command: "",
+        time_override: -1,
+      }, { busyKey: `quick:${quickAction.label}` });
+      showActionStatus("success", `${quickAction.label} queued (${data.command_count} command).`);
+    } catch (e) {
+      showActionStatus("error", `Failed to queue ${quickAction.label.toLowerCase()}: ${e.message}`);
+    }
+  }, [queueCommand, showActionStatus]);
+
+  const resetMission = useCallback(async () => {
+    const confirmed = window.confirm("Reset mission state, command log, tactical memory, and queued commands?");
+    if (!confirmed) {
+      showActionStatus("info", "Reset cancelled.");
+      return;
+    }
+
+    setBusyAction("reset");
+    try {
+      await fetchJson("/api/reset", { method: "POST" });
+      await fetchData();
+      showActionStatus("success", "Mission state reset.");
+    } catch (e) {
+      showActionStatus("error", `Reset failed: ${e.message}`);
+    } finally {
+      setBusyAction("");
+    }
+  }, [fetchData, fetchJson, showActionStatus]);
 
   useEffect(() => {
     fetchData();
@@ -364,6 +880,8 @@ function Dashboard() {
   const contacts = state.contacts || [];
   const events = state.recent_events || [];
   const allCommands = commandLog.flatMap((c) => (c.commands?.commands || []).map((cmd) => ({ ...cmd, _ts: c.timestamp, _source: c.source || "llm" })));
+  const connectionState = !hasLoadedOnce ? "connecting" : connected ? "connected" : "offline";
+  const connectionLabel = connectionState === "connecting" ? "CONNECTING" : connectionState === "connected" ? "CONNECTED" : "OFFLINE";
 
   const tabStyle = (t) => ({
     padding: "8px 20px",
@@ -409,9 +927,9 @@ function Dashboard() {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 16, fontSize: 12, fontFamily: "JetBrains Mono" }}>
-          <StatusDot ok={connected} />
-          <span style={{ color: connected ? "#00ff88" : "#ff4444" }}>
-            {connected ? "CONNECTED" : "OFFLINE"}
+          <StatusDot state={connectionState} />
+          <span style={{ color: connectionState === "connected" ? "#00ff88" : connectionState === "connecting" ? "#ffcc66" : "#ff4444" }}>
+            {connectionLabel}
           </span>
           {health && (
             <span style={{ color: "#445544" }}>
@@ -426,13 +944,16 @@ function Dashboard() {
         <button style={tabStyle("overview")} onClick={() => setTab("overview")}>Overview</button>
         <button style={tabStyle("units")} onClick={() => setTab("units")}>Units</button>
         <button style={tabStyle("commands")} onClick={() => setTab("commands")}>Command Log</button>
+        <button style={tabStyle("intel")} onClick={() => setTab("intel")}>Intel</button>
         <button style={tabStyle("manual")} onClick={() => setTab("manual")}>Manual Control</button>
       </div>
 
-      <div style={{ padding: "16px 24px 40px", maxWidth: 1100 }}>
+      <div style={{ padding: "16px 24px 40px", maxWidth: 1600 }}>
         {/* OVERVIEW TAB */}
         {tab === "overview" && (
-          <>
+          <div style={{ display: "flex", gap: 24 }}>
+          {/* Left column - stats & info */}
+          <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
               <StatCard label="Players" value={state.player_count ?? "\u2014"} sub={`${players.length} tracked`} />
               <StatCard label="Mission Time" value={fmtTime(state.mission_time_seconds)} />
@@ -442,10 +963,24 @@ function Dashboard() {
               <StatCard label="Errors" value={health?.total_errors ?? "\u2014"} accent={health?.total_errors > 0 ? "#ff4444" : "#00ff88"} />
             </div>
 
+            {/* LLM Health + Error Rate Row */}
+            <SectionHeader>LLM Health</SectionHeader>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+              <div style={{ flex: 2, minWidth: 280 }}>
+                <LLMHealthIndicator statsData={statsData} />
+              </div>
+              <ErrorRateDisplay health={health} />
+            </div>
+
+            {/* Response Time Sparkline */}
+            <div style={{ marginTop: 12 }}>
+              <ResponseTimeSparkline times={statsData?.recent_response_times_ms} />
+            </div>
+
             <SectionHeader>Environment</SectionHeader>
             <div style={{ display: "flex", gap: 24, fontSize: 13, fontFamily: "JetBrains Mono", flexWrap: "wrap" }}>
               <div>Weather: <span style={{ color: "#00ff88" }}>{state.current_weather || "\u2014"}</span></div>
-              <div>Time: <span style={{ color: "#ffcc66" }}>{state.time_of_day ? `${Math.floor(state.time_of_day)}:${String(Math.floor((state.time_of_day % 1) * 60)).padStart(2, "0")}` : "\u2014"}</span></div>
+              <div>Time: <span style={{ color: "#ffcc66" }}>{state.time_of_day != null ? `${Math.floor(state.time_of_day)}:${String(Math.floor((state.time_of_day % 1) * 60)).padStart(2, "0")}` : "\u2014"}</span></div>
               <div>Wind: <span style={{ color: "#88bbff" }}>{fmt(state.wind_speed)} m/s @ {fmt(state.wind_direction)}\u00b0</span></div>
             </div>
 
@@ -481,7 +1016,50 @@ function Dashboard() {
               <div>Error rate: {health ? fmt(health.total_errors / Math.max(health.total_requests, 1) * 100) : "\u2014"}%</div>
               {health?.glm_endpoint && <div>GLM endpoint: {health.glm_endpoint}</div>}
             </div>
-          </>
+
+            <SectionHeader>Queue & Reliability</SectionHeader>
+            <div style={{ fontSize: 12, fontFamily: "JetBrains Mono", color: "#556655", lineHeight: 1.8 }}>
+              <div>
+                Circuit breaker:{" "}
+                <span style={{ color: statsData?.llm_circuit_status === "open" ? "#ff4444" : statsData?.llm_circuit_status === "half-open" ? "#ffaa44" : "#00ff88", fontWeight: 600 }}>
+                  {statsData?.llm_circuit_status?.toUpperCase() ?? "CLOSED"}
+                </span>
+                {statsData?.llm_consecutive_failures > 0 && (
+                  <span style={{ color: "#ff8844", marginLeft: 8 }}>({statsData.llm_consecutive_failures} consecutive failures)</span>
+                )}
+              </div>
+              <div>
+                Inflight LLM calls:{" "}
+                <span style={{ color: "#88bbff" }}>{statsData?.llm_inflight ?? 0}</span>
+                <span style={{ color: "#445544" }}> / {statsData?.llm_max_concurrent ?? "?"}</span>
+              </div>
+              <div>
+                Retries:{" "}
+                <span style={{ color: health?.llm_retries > 0 ? "#ffaa44" : "#556655" }}>
+                  {health?.llm_retries ?? 0}
+                </span>
+                {" \u00b7 "}429s:{" "}
+                <span style={{ color: health?.llm_429s > 0 ? "#ff6644" : "#556655" }}>
+                  {health?.llm_429s ?? 0}
+                </span>
+                {" \u00b7 "}Coalesced:{" "}
+                <span style={{ color: "#88bbff" }}>
+                  {health?.llm_coalesced_requests ?? 0}
+                </span>
+                {" \u00b7 "}Circuit breaks:{" "}
+                <span style={{ color: health?.llm_circuit_breaks > 0 ? "#ff4444" : "#556655" }}>
+                  {health?.llm_circuit_breaks ?? 0}
+                </span>
+              </div>
+            </div>
+
+          </div>
+          {/* Right column - Command Execution Log */}
+          <div style={{ width: 480, flexShrink: 0 }}>
+            <SectionHeader>Command Execution Log</SectionHeader>
+            <CommandExecutionLog commandLog={commandLog} />
+          </div>
+          </div>
         )}
 
         {/* UNITS TAB */}
@@ -642,6 +1220,498 @@ function Dashboard() {
           </>
         )}
 
+        {/* INTEL TAB */}
+        {tab === "intel" && (
+          <>
+            {/* Tactic Performance */}
+            <SectionHeader>Tactic Performance</SectionHeader>
+            {(() => {
+              const perfData = statsData?.tactic_performance || {};
+              const allPerf = Object.values(perfData);
+              // Merge all sessions together for display
+              const merged = {};
+              allPerf.forEach((sessionPerf) => {
+                const outcomes = sessionPerf?.tactic_outcomes || {};
+                Object.entries(outcomes).forEach(([tactic, data]) => {
+                  if (!merged[tactic]) merged[tactic] = { issued: 0, successful: 0, failed: 0 };
+                  merged[tactic].issued += data.issued || 0;
+                  merged[tactic].successful += data.successful || 0;
+                  merged[tactic].failed += data.failed || 0;
+                });
+              });
+              const tacticEntries = Object.entries(merged);
+              if (tacticEntries.length === 0) {
+                return <div style={{ color: "#445544", fontSize: 12, fontFamily: "JetBrains Mono" }}>No tactic data yet</div>;
+              }
+
+              // Find best and worst
+              let bestTactic = null, worstTactic = null, bestRate = -1, worstRate = 2;
+              tacticEntries.forEach(([name, d]) => {
+                const rate = d.issued > 0 ? d.successful / d.issued : 0;
+                if (rate > bestRate) { bestRate = rate; bestTactic = name; }
+                if (rate < worstRate) { worstRate = rate; worstTactic = name; }
+              });
+
+              return (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, fontFamily: "JetBrains Mono" }}>
+                    <thead>
+                      <tr style={{ borderBottom: "1px solid rgba(0,255,136,0.15)" }}>
+                        <th style={{ textAlign: "left", padding: "6px 8px", color: "#667766", fontWeight: 500 }}>Tactic</th>
+                        <th style={{ textAlign: "right", padding: "6px 8px", color: "#667766", fontWeight: 500 }}>Issued</th>
+                        <th style={{ textAlign: "right", padding: "6px 8px", color: "#667766", fontWeight: 500 }}>Success</th>
+                        <th style={{ textAlign: "right", padding: "6px 8px", color: "#667766", fontWeight: 500 }}>Failed</th>
+                        <th style={{ textAlign: "right", padding: "6px 8px", color: "#667766", fontWeight: 500 }}>Rate</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {tacticEntries.map(([name, d]) => {
+                        const rate = d.issued > 0 ? (d.successful / d.issued * 100) : 0;
+                        const isBest = name === bestTactic && tacticEntries.length > 1;
+                        const isWorst = name === worstTactic && tacticEntries.length > 1;
+                        const rateColor = rate > 60 ? "#00ff88" : rate > 30 ? "#ffaa00" : "#ff4444";
+                        return (
+                          <tr key={name} style={{ borderBottom: "1px solid rgba(0,255,136,0.06)" }}>
+                            <td style={{ padding: "5px 8px", color: isBest ? "#00ff88" : isWorst ? "#ff4444" : "#ccddcc" }}>
+                              {isBest && "\u2605 "}{isWorst && "\u2717 "}{name}
+                            </td>
+                            <td style={{ padding: "5px 8px", textAlign: "right", color: "#889988" }}>{d.issued}</td>
+                            <td style={{ padding: "5px 8px", textAlign: "right", color: "#00ff88" }}>{d.successful}</td>
+                            <td style={{ padding: "5px 8px", textAlign: "right", color: "#ff4444" }}>{d.failed}</td>
+                            <td style={{ padding: "5px 8px", textAlign: "right" }}>
+                              <span style={{ color: rateColor }}>{rate.toFixed(0)}%</span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })()}
+
+            {/* Spatial Intelligence */}
+            <SectionHeader>Spatial Intelligence</SectionHeader>
+            {(() => {
+              const spatial = tacticalIntel?.spatial || {};
+              const clustering = spatial.player_clustering;
+              const zones = spatial.engagement_zones || [];
+
+              if (!clustering && zones.length === 0) {
+                return <div style={{ color: "#445544", fontSize: 12, fontFamily: "JetBrains Mono" }}>No spatial data available</div>;
+              }
+
+              return (
+                <div style={{ fontSize: 12, fontFamily: "JetBrains Mono" }}>
+                  {clustering && (
+                    <div style={{ marginBottom: 12 }}>
+                      <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+                        <StatCard
+                          label="Formation"
+                          value={clustering.formation?.replace(/_/g, " ") || "\u2014"}
+                          sub={`Spread: ${clustering.avg_spread_m ?? 0}m`}
+                          accent="#88bbff"
+                        />
+                      </div>
+                      {clustering.tactical_note && (
+                        <div style={{ marginTop: 8, color: "#889988", fontSize: 11, fontStyle: "italic" }}>
+                          {clustering.tactical_note}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {zones.length > 0 && (
+                    <div>
+                      <div style={{ color: "#667766", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6 }}>
+                        Active Engagement Zones ({zones.length})
+                      </div>
+                      {zones.map((z, i) => {
+                        const intensityColors = { hot: "#ff4444", warm: "#ffaa00", developing: "#88bbff" };
+                        const iColor = intensityColors[z.intensity] || "#667766";
+                        return (
+                          <div key={i} style={{
+                            display: "flex", gap: 14, padding: "4px 0",
+                            borderBottom: "1px solid rgba(0,255,136,0.06)", alignItems: "center",
+                          }}>
+                            <span style={{
+                              display: "inline-block", width: 8, height: 8, borderRadius: "50%",
+                              background: iColor, boxShadow: `0 0 4px ${iColor}66`, flexShrink: 0,
+                            }} />
+                            <span style={{ color: iColor, width: 80, flexShrink: 0 }}>{z.intensity}</span>
+                            <span style={{ color: "#889988" }}>center: {z.center}</span>
+                            <span style={{ color: "#667766" }}>radius: {z.radius_m}m</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            {/* Morale Status Panel */}
+            <SectionHeader>Morale Status</SectionHeader>
+            {(() => {
+              const morale = tacticalIntel?.morale || {};
+              const overall = morale.overall || "unknown";
+              const moraleColors = { strong: "#00ff88", steady: "#ffcc66", shaky: "#ff8844", critical: "#ff4444" };
+              const moraleColor = moraleColors[overall] || "#667766";
+              const warnings = morale.warnings || [];
+              const brokenCount = morale.broken_units || 0;
+              const totalUnits = enemyUnits.length;
+
+              return (
+                <div style={{ fontSize: 12, fontFamily: "JetBrains Mono" }}>
+                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+                    <div style={{
+                      background: "rgba(0,255,136,0.03)", border: `1px solid ${moraleColor}33`,
+                      padding: "14px 18px", minWidth: 160,
+                    }}>
+                      <div style={{ fontSize: 11, color: "#667766", letterSpacing: 1.5, fontFamily: "JetBrains Mono", textTransform: "uppercase" }}>
+                        Overall Morale
+                      </div>
+                      <div style={{ fontSize: 28, fontWeight: 700, color: moraleColor, fontFamily: "Rajdhani", marginTop: 2, lineHeight: 1, textTransform: "uppercase" }}>
+                        {overall}
+                      </div>
+                      <div style={{ fontSize: 10, color: "#556655", fontFamily: "JetBrains Mono", marginTop: 4 }}>
+                        {brokenCount > 0
+                          ? `${brokenCount} broken / ${totalUnits} total`
+                          : `${totalUnits} units operational`}
+                      </div>
+                    </div>
+                    <StatCard
+                      label="Broken Units"
+                      value={brokenCount}
+                      sub={`of ${totalUnits} total OPFOR`}
+                      accent={brokenCount > 0 ? "#ff4444" : "#00ff88"}
+                    />
+                  </div>
+
+                  {warnings.length > 0 ? (
+                    <div>
+                      <div style={{ color: "#667766", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6 }}>
+                        Units Flagged for Retreat / Merge ({warnings.length})
+                      </div>
+                      {warnings.map((w, i) => {
+                        const hp = (w.health_pct || 0) * 100;
+                        const hpColor = hp > 50 ? "#ffaa00" : "#ff4444";
+                        return (
+                          <div key={i} style={{
+                            display: "flex", gap: 14, padding: "6px 0", alignItems: "center",
+                            borderBottom: "1px solid rgba(0,255,136,0.06)",
+                          }}>
+                            <span style={{ color: "#ff8844", width: 90, flexShrink: 0, fontWeight: 600 }}>{w.unit_id}</span>
+                            <div style={{ width: 80, flexShrink: 0 }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                <div style={{ flex: 1, background: "rgba(0,255,136,0.08)", height: 4, borderRadius: 2, overflow: "hidden" }}>
+                                  <div style={{ width: `${hp}%`, height: "100%", background: hpColor, borderRadius: 2 }} />
+                                </div>
+                                <span style={{ color: hpColor, fontSize: 11 }}>{hp.toFixed(0)}%</span>
+                              </div>
+                            </div>
+                            <span style={{ color: "#667766", width: 60, flexShrink: 0 }}>str: {w.strength ?? "?"}</span>
+                            <span style={{ color: "#889988", flex: 1, fontSize: 11 }}>{w.recommendation}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div style={{ color: "#445544", fontSize: 12, fontFamily: "JetBrains Mono" }}>No units flagged for retreat or merge</div>
+                  )}
+                </div>
+              );
+            })()}
+
+            {/* Counter-Ambush Warnings Panel */}
+            <SectionHeader>Counter-Ambush Warnings</SectionHeader>
+            {(() => {
+              const spatial = tacticalIntel?.spatial || {};
+              const ambushWarnings = spatial.ambush_warnings || [];
+
+              if (ambushWarnings.length === 0) {
+                return <div style={{ color: "#445544", fontSize: 12, fontFamily: "JetBrains Mono" }}>No active ambush threats detected</div>;
+              }
+
+              // Detect coordinated ambushes: multiple stationary players within 200m of each other
+              const coordinated = [];
+              for (let i = 0; i < ambushWarnings.length; i++) {
+                for (let j = i + 1; j < ambushWarnings.length; j++) {
+                  const a = ambushWarnings[i];
+                  const b = ambushWarnings[j];
+                  const posA = a.position || [0,0,0];
+                  const posB = b.position || [0,0,0];
+                  const dx = posA[0] - posB[0];
+                  const dz = (posA[2] || 0) - (posB[2] || 0);
+                  const dist = Math.sqrt(dx*dx + dz*dz);
+                  if (dist < 200) {
+                    coordinated.push({ players: [a.player_id, b.player_id], distance: Math.round(dist) });
+                  }
+                }
+              }
+
+              return (
+                <div style={{ fontSize: 12, fontFamily: "JetBrains Mono" }}>
+                  {/* Coordinated ambush alert */}
+                  {coordinated.length > 0 && (
+                    <div style={{
+                      padding: "8px 12px", marginBottom: 12,
+                      background: "rgba(255,68,68,0.08)", border: "1px solid rgba(255,68,68,0.25)",
+                    }}>
+                      <div style={{ color: "#ff4444", fontWeight: 600, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>
+                        !! Coordinated Ambush Alert
+                      </div>
+                      {coordinated.map((c, i) => (
+                        <div key={i} style={{ color: "#ff8844", fontSize: 11, padding: "2px 0" }}>
+                          Players {c.players.join(" & ")} in crossfire setup ({c.distance}m apart)
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div style={{ color: "#667766", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6 }}>
+                    Active Warnings ({ambushWarnings.length})
+                  </div>
+                  {ambushWarnings.map((w, i) => {
+                    const pos = Array.isArray(w.position) ? w.position : [0,0,0];
+                    const posStr = `${Math.round(pos[0])}, ${Math.round(pos[2] || 0)}`;
+                    const engagements = w.engagements || 0;
+                    const engColor = engagements > 5 ? "#ff4444" : engagements > 2 ? "#ff8844" : "#ffaa00";
+
+                    // Compute kill zone info from position and nearby engagement data
+                    const bearing = pos[0] !== 0 ? Math.round(Math.atan2(pos[0], pos[2] || 1) * 180 / Math.PI + 360) % 360 : 0;
+
+                    return (
+                      <div key={i} style={{
+                        padding: "8px 10px", marginBottom: 6,
+                        background: "rgba(255,136,0,0.04)", border: "1px solid rgba(255,136,0,0.12)",
+                      }}>
+                        <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+                          <span style={{ color: "#4488ff", fontWeight: 600 }}>Player {w.player_id}</span>
+                          <span style={{ color: "#889988" }}>pos: {posStr}</span>
+                          <span style={{ color: engColor }}>engagements: {engagements}</span>
+                          <span style={{ color: "#667766" }}>stationary: {w.stationary_cycles || "?"} cycles</span>
+                        </div>
+                        {/* Kill Zone Visualization */}
+                        <div style={{ display: "flex", gap: 16, marginTop: 6, fontSize: 11, color: "#667766" }}>
+                          <span>bearing: <span style={{ color: "#88bbff" }}>{bearing}{"\u00b0"}</span></span>
+                          <span>arc: <span style={{ color: "#88bbff" }}>~120{"\u00b0"}</span></span>
+                          <span>depth: <span style={{ color: "#88bbff" }}>~150m</span></span>
+                        </div>
+                        {/* Safe approach recommendation */}
+                        <div style={{ marginTop: 6, fontSize: 11, color: "#aacc88", fontStyle: "italic" }}>
+                          Safe approach: flank from {(bearing + 90) % 360}{"\u00b0"} or {(bearing + 270) % 360}{"\u00b0"} {"—"} use smoke/concealment before closing within 100m
+                        </div>
+                        {/* Threat description */}
+                        {w.threat && (
+                          <div style={{ marginTop: 4, fontSize: 10, color: "#ff8844" }}>
+                            {w.threat}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+
+            {/* Player Profile Trends */}
+            <SectionHeader>Player Profile Trends</SectionHeader>
+            {(() => {
+              const profiles = tacticalIntel?.player_profiles || {};
+              const entries = Object.entries(profiles);
+              if (entries.length === 0) {
+                return <div style={{ color: "#445544", fontSize: 12, fontFamily: "JetBrains Mono" }}>No player profile data</div>;
+              }
+
+              // Map styles to trend indicators and predicted actions
+              const trendMap = {
+                aggressive_assault: { trend: "\u2191", trendLabel: "escalating", predicted: "Push forward with heavy fire", trendColor: "#ff4444" },
+                aggressive_push: { trend: "\u2191", trendLabel: "escalating", predicted: "Sustained offensive pressure", trendColor: "#ff4444" },
+                flanking_maneuver: { trend: "\u2192", trendLabel: "consistent", predicted: "Continue flanking to side/rear", trendColor: "#ffcc66" },
+                defensive_sniper: { trend: "\u2193", trendLabel: "de-escalating", predicted: "Hold position, pick targets", trendColor: "#00aaff" },
+                cautious_observer: { trend: "\u2193", trendLabel: "de-escalating", predicted: "Recon before committing", trendColor: "#00aaff" },
+                balanced_advance: { trend: "\u2192", trendLabel: "consistent", predicted: "Steady advance with engagement", trendColor: "#ffcc66" },
+                unknown: { trend: "\u2014", trendLabel: "unknown", predicted: "Insufficient data", trendColor: "#556655" },
+              };
+
+              const styleColors = {
+                aggressive_assault: "#ff4444",
+                aggressive_push: "#ff6644",
+                flanking_maneuver: "#ff8844",
+                defensive_sniper: "#00aaff",
+                cautious_observer: "#88bbff",
+                balanced_advance: "#00ff88",
+                unknown: "#556655",
+              };
+
+              return (
+                <div>
+                  {entries.map(([pid, profile]) => {
+                    const style = profile.style || "unknown";
+                    const confidence = Math.min(profile.confidence || 0, 1);
+                    const confPct = (confidence * 100).toFixed(0);
+                    const confColor = confidence > 0.7 ? "#00ff88" : confidence > 0.4 ? "#ffaa00" : "#ff4444";
+                    const tInfo = trendMap[style] || trendMap.unknown;
+                    const sColor = styleColors[style] || "#667766";
+
+                    return (
+                      <div key={pid} style={{
+                        padding: "10px 12px", marginBottom: 6,
+                        background: "rgba(0,255,136,0.03)", border: "1px solid rgba(0,255,136,0.10)",
+                        fontSize: 12, fontFamily: "JetBrains Mono",
+                      }}>
+                        {/* Top row: player ID, style, trend */}
+                        <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+                          <span style={{ color: "#4488ff", fontWeight: 600, width: 80, flexShrink: 0 }}>Player {pid}</span>
+                          <span style={{ color: sColor, fontWeight: 600 }}>{style.replace(/_/g, " ")}</span>
+                          <span style={{ color: tInfo.trendColor, fontSize: 14, fontWeight: 700 }}>{tInfo.trend}</span>
+                          <span style={{ color: tInfo.trendColor, fontSize: 10 }}>{tInfo.trendLabel}</span>
+                          {profile.engagements != null && (
+                            <span style={{ color: "#667766", fontSize: 11 }}>{profile.engagements} engagements</span>
+                          )}
+                          {profile.movement_rate != null && (
+                            <span style={{ color: "#556655", fontSize: 11 }}>{profile.movement_rate} m/s avg</span>
+                          )}
+                        </div>
+                        {/* Predicted next action */}
+                        <div style={{ marginTop: 6, fontSize: 11, color: "#889988" }}>
+                          Predicted: <span style={{ color: "#aacc88" }}>{tInfo.predicted}</span>
+                        </div>
+                        {/* Confidence progress bar */}
+                        <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 10 }}>
+                          <span style={{ fontSize: 10, color: "#556655", width: 70, flexShrink: 0 }}>Confidence</span>
+                          <div style={{ flex: 1, maxWidth: 200, background: "rgba(0,255,136,0.08)", height: 6, borderRadius: 3, overflow: "hidden" }}>
+                            <div style={{
+                              width: `${confPct}%`, height: "100%",
+                              background: confColor, borderRadius: 3,
+                              transition: "width 0.3s ease",
+                            }} />
+                          </div>
+                          <span style={{ color: confColor, fontSize: 11, width: 36, textAlign: "right", flexShrink: 0 }}>{confPct}%</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+
+            {/* Player Movement Vectors */}
+            <SectionHeader>Player Movement Vectors</SectionHeader>
+            {(() => {
+              const vectors = tacticalIntel?.player_vectors || {};
+              const entries = Object.entries(vectors);
+              if (entries.length === 0) {
+                return <div style={{ color: "#445544", fontSize: 12, fontFamily: "JetBrains Mono" }}>No player vector data</div>;
+              }
+              return (
+                <div>
+                  {entries.map(([pid, vec]) => {
+                    const speed = vec.speed_mps || 0;
+                    const speedColor = vec.is_sprinting ? "#ff4444" : vec.is_moving ? "#00aaff" : "#556655";
+                    const heading = vec.heading || 0;
+                    const dir = vec.predicted_direction || "unknown";
+                    return (
+                      <div key={pid} style={{
+                        display: "flex", gap: 16, padding: "5px 0", alignItems: "center",
+                        borderBottom: "1px solid rgba(0,255,136,0.06)",
+                        fontSize: 12, fontFamily: "JetBrains Mono",
+                      }}>
+                        <span style={{ color: "#4488ff", width: 80, flexShrink: 0 }}>Player {pid}</span>
+                        <span style={{ color: "#889988", width: 80, flexShrink: 0 }}>hdg: {heading.toFixed(0)}\u00b0</span>
+                        <span style={{ color: speedColor, width: 80, flexShrink: 0 }}>{speed.toFixed(1)} m/s</span>
+                        <span style={{ color: "#00ff88" }}>\u2192 {dir.replace(/_/g, " ")}</span>
+                        {vec.is_sprinting && (
+                          <span style={{ fontSize: 9, padding: "1px 5px", background: "rgba(255,68,68,0.15)", color: "#ff4444", border: "1px solid rgba(255,68,68,0.3)" }}>SPRINT</span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+
+            {/* Per-Unit Combat Stats */}
+            <SectionHeader>Unit Combat Stats</SectionHeader>
+            {(() => {
+              const allUnits = [...enemyUnits, ...friendlyUnits];
+              const unitsWithStats = allUnits.filter(u => u.kills != null || u.casualties != null);
+              if (unitsWithStats.length === 0) {
+                return <div style={{ color: "#445544", fontSize: 12, fontFamily: "JetBrains Mono" }}>No combat stats reported</div>;
+              }
+              return (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, fontFamily: "JetBrains Mono" }}>
+                    <thead>
+                      <tr style={{ borderBottom: "1px solid rgba(0,255,136,0.15)" }}>
+                        <th style={{ textAlign: "left", padding: "6px 8px", color: "#667766", fontWeight: 500 }}>Unit</th>
+                        <th style={{ textAlign: "left", padding: "6px 8px", color: "#667766", fontWeight: 500 }}>Type</th>
+                        <th style={{ textAlign: "right", padding: "6px 8px", color: "#667766", fontWeight: 500 }}>Kills</th>
+                        <th style={{ textAlign: "right", padding: "6px 8px", color: "#667766", fontWeight: 500 }}>Casualties</th>
+                        <th style={{ textAlign: "right", padding: "6px 8px", color: "#667766", fontWeight: 500 }}>K/C Ratio</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {unitsWithStats.map((u, i) => {
+                        const kills = u.kills || 0;
+                        const cas = u.casualties || 0;
+                        const ratio = cas > 0 ? (kills / cas) : kills > 0 ? "\u221e" : "\u2014";
+                        const ratioColor = typeof ratio === "number" ? (ratio >= 1 ? "#00ff88" : "#ff4444") : ratio === "\u221e" ? "#00ff88" : "#556655";
+                        return (
+                          <tr key={i} style={{ borderBottom: "1px solid rgba(0,255,136,0.06)" }}>
+                            <td style={{ padding: "5px 8px", color: "#00ff88" }}>{u.unit_id}</td>
+                            <td style={{ padding: "5px 8px", color: "#889988" }}>{u.unit_type}</td>
+                            <td style={{ padding: "5px 8px", textAlign: "right", color: "#ff4444" }}>{kills}</td>
+                            <td style={{ padding: "5px 8px", textAlign: "right", color: "#ffaa00" }}>{cas}</td>
+                            <td style={{ padding: "5px 8px", textAlign: "right", color: ratioColor }}>
+                              {typeof ratio === "number" ? ratio.toFixed(1) : ratio}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })()}
+
+            {/* Terrain Overview */}
+            <SectionHeader>Terrain Overview</SectionHeader>
+            {(() => {
+              const terrain = tacticalIntel?.terrain_summary || {};
+              const entries = Object.entries(terrain);
+              if (entries.length === 0) {
+                return <div style={{ color: "#445544", fontSize: 12, fontFamily: "JetBrains Mono" }}>No terrain data available</div>;
+              }
+              return (
+                <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                  {entries.map(([type, data]) => {
+                    const coverPct = ((data.avg_cover || 0) * 100).toFixed(0);
+                    const coverColor = data.avg_cover > 0.6 ? "#00ff88" : data.avg_cover > 0.3 ? "#ffaa00" : "#ff8844";
+                    return (
+                      <div key={type} style={{
+                        background: "rgba(0,255,136,0.03)", border: "1px solid rgba(0,255,136,0.12)",
+                        padding: "10px 16px", minWidth: 130,
+                      }}>
+                        <div style={{ fontSize: 11, color: "#667766", letterSpacing: 1.5, fontFamily: "JetBrains Mono", textTransform: "uppercase" }}>
+                          {type}
+                        </div>
+                        <div style={{ fontSize: 22, fontWeight: 700, color: coverColor, fontFamily: "Rajdhani", marginTop: 2 }}>
+                          {coverPct}%
+                        </div>
+                        <div style={{ fontSize: 10, color: "#556655", fontFamily: "JetBrains Mono", marginTop: 2 }}>
+                          cover \u00b7 {data.count || 0} sample{(data.count || 0) !== 1 ? "s" : ""}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+          </>
+        )}
+
         {/* MANUAL CONTROL TAB */}
         {tab === "manual" && (
           <>
@@ -649,33 +1719,15 @@ function Dashboard() {
             <div style={{ fontSize: 12, color: "#556655", fontFamily: "JetBrains Mono", marginBottom: 14 }}>
               Send commands directly to the game, bypassing the LLM. Commands are merged into the next SITREP response.
             </div>
-            <ManualCommandPanel onSend={fetchData} serverUrl={serverUrl} />
+            <ManualCommandPanel queueCommand={queueCommand} busy={busyAction === "manual"} />
 
             <SectionHeader>Quick Actions</SectionHeader>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {[
-                { label: "Storm", cmd: { command_type: "set_weather", parameters: "Storm" }, color: "#88bbff" },
-                { label: "Fog", cmd: { command_type: "set_weather", parameters: "Foggy" }, color: "#aaaaaa" },
-                { label: "Clear", cmd: { command_type: "set_weather", parameters: "Clear" }, color: "#ffcc66" },
-                { label: "Night", cmd: { command_type: "set_time", parameters: "22.5" }, color: "#6666aa" },
-                { label: "Dawn", cmd: { command_type: "set_time", parameters: "5.75" }, color: "#ff8844" },
-                { label: "Cleanup Dead", cmd: { command_type: "cleanup_dead", parameters: "" }, color: "#667766" },
-              ].map((q) => (
+              {quickActions.map((q) => (
                 <button
                   key={q.label}
-                  onClick={async () => {
-                    await fetch(`${serverUrl}/api/manual-command`, {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        commands: [{ ...q.cmd, unit_id: "", target_position: "0,0,0", narrative: "", reasoning: "quick_action" }],
-                        narrative_broadcast: "",
-                        weather_command: "",
-                        time_override: -1,
-                      }),
-                    });
-                    fetchData();
-                  }}
+                  disabled={!!busyAction}
+                  onClick={() => queueQuickAction(q)}
                   style={{
                     background: "transparent",
                     border: `1px solid ${q.color}44`,
@@ -683,22 +1735,22 @@ function Dashboard() {
                     padding: "6px 16px",
                     fontFamily: "JetBrains Mono",
                     fontSize: 11,
-                    cursor: "pointer",
+                    cursor: busyAction ? "wait" : "pointer",
                     letterSpacing: 0.5,
+                    opacity: busyAction ? 0.55 : 1,
                   }}
                 >
-                  {q.label}
+                  {busyAction === `quick:${q.label}` ? `… ${q.label}` : q.label}
                 </button>
               ))}
             </div>
+            <ActionStatus status={actionStatus} />
 
             <SectionHeader>Mission Control</SectionHeader>
             <div style={{ display: "flex", gap: 8 }}>
               <button
-                onClick={async () => {
-                  await fetch(`${serverUrl}/api/reset`, { method: "POST" });
-                  fetchData();
-                }}
+                disabled={!!busyAction}
+                onClick={resetMission}
                 style={{
                   background: "rgba(255,68,68,0.08)",
                   border: "1px solid rgba(255,68,68,0.25)",
@@ -706,12 +1758,13 @@ function Dashboard() {
                   padding: "8px 20px",
                   fontFamily: "JetBrains Mono",
                   fontSize: 11,
-                  cursor: "pointer",
+                  cursor: busyAction ? "wait" : "pointer",
                   letterSpacing: 1,
                   textTransform: "uppercase",
+                  opacity: busyAction ? 0.6 : 1,
                 }}
               >
-                \u27f3 Reset Mission
+                {busyAction === "reset" ? "… Resetting" : "\u27f3 Reset Mission"}
               </button>
             </div>
           </>
@@ -735,7 +1788,7 @@ function Dashboard() {
           color: "#334433",
         }}
       >
-        <span>SITREP age: {gameState?.age_seconds ? `${fmt(gameState.age_seconds)}s` : "\u2014"}</span>
+        <span>SITREP age: {gameState?.age_seconds != null ? `${fmt(gameState.age_seconds)}s` : "\u2014"}</span>
         <span>Polling every {POLL_INTERVAL / 1000}s</span>
         <span>{new Date().toLocaleTimeString()}</span>
       </div>

@@ -227,39 +227,67 @@ class GM_VehicleManager
 
     protected ResourceName GetVehiclePrefab(string type)
     {
+        // Normalize: lowercase and strip whitespace for resilient LLM output matching
+        type = type.Trim();
+        type = type.ToLower();
+
         switch (type)
         {
             // ── US Vehicles ──
             case "m998_humvee":
+            case "humvee":
+            case "m998":
                 return "{5D63BFCD0CF5171D}Prefabs/Vehicles/Wheeled/M998/M998_MERDC.et";
             case "m998_humvee_mg":
+            case "humvee_mg":
+            case "m998_mg":
                 return "{F8AD0B2A71D053B0}Prefabs/Vehicles/Wheeled/M998/M998_MG_MERDC.et";
             case "m151_jeep":
+            case "m151":
+            case "jeep":
                 return "{EF93C920FF4B2ED5}Prefabs/Vehicles/Wheeled/M151A2/M151A2.et";
             case "m35_truck":
+            case "m35":
+            case "us_truck":
                 return "{3A3B42B17D4CDFE2}Prefabs/Vehicles/Wheeled/M35A2/M35A2.et";
 
             // ── USSR Vehicles ──
             case "uaz469":
+            case "uaz":
                 return "{2B43AF0BE6F3ACED}Prefabs/Vehicles/Wheeled/UAZ469/UAZ469.et";
             case "uaz469_mg":
+            case "uaz_mg":
+            case "uaz_dshk":
                 return "{3AB3BE7E06DA1839}Prefabs/Vehicles/Wheeled/UAZ469/UAZ469_DShK.et";
             case "btr70":
+            case "btr":
+            case "apc":
                 return "{1B7E1C1DE3B96050}Prefabs/Vehicles/Wheeled/BTR70/BTR70.et";
             case "ural_truck":
+            case "ural":
+            case "ussr_truck":
+            case "truck":
                 return "{A6A4292F62F8C82C}Prefabs/Vehicles/Wheeled/Ural4320/Ural4320.et";
             case "bmp1":
+            case "bmp":
+            case "ifv":
                 return "{25DFE68DAE77A9AF}Prefabs/Vehicles/Tracked/BMP1/BMP1.et";
             case "t72":
+            case "t72a":
+            case "tank":
                 return "{52DF10B7D361DE80}Prefabs/Vehicles/Tracked/T72/T72A.et";
 
             // ── Helicopters ──
             case "uh1h":
+            case "uh1":
+            case "huey":
+            case "helicopter":
+            case "heli":
                 return "{E1C9450B2E9A1E38}Prefabs/Vehicles/Helicopters/UH1H/UH1H.et";
 
             default:
-                Print("[GodMode:Vehicle] Unknown vehicle type: " + type, LogLevel.WARNING);
-                return "";
+                Print("[GodMode:Vehicle] Unknown vehicle type: '" + type + "', falling back to UAZ469", LogLevel.WARNING);
+                return "{2B43AF0BE6F3ACED}Prefabs/Vehicles/Wheeled/UAZ469/UAZ469.et";
         }
     }
 

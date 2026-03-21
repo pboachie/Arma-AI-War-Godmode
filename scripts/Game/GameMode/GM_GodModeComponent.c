@@ -171,6 +171,12 @@ class GM_GodModeComponent : SCR_BaseGameModeComponent
         super.OnPlayerDisconnected(playerId, cause, timeout);
         m_iPlayerCount = Math.Max(0, m_iPlayerCount - 1);
         LogEvent("player_disconnected:" + playerId);
+
+        // Clean up player tracking data to prevent memory leaks
+        m_mPlayerPositionTrails.Remove(playerId);
+        m_mPlayerLastPositions.Remove(playerId);
+        m_mPlayerLastUpdateTimes.Remove(playerId);
+
         AdjustLimitsForPlayerCount();
     }
 
@@ -196,7 +202,7 @@ class GM_GodModeComponent : SCR_BaseGameModeComponent
             type = entity.GetPrefabData().GetPrefabName();
 
         LogEvent("unit_destroyed:" + type);
-        m_CleanupSys.ScheduleCleanup(entity, 120.0);
+        m_CleanupSys.ScheduleCleanupById(entity.GetID(), 120.0);
     }
 
     // ═══════════════════════════════════════════════
@@ -431,7 +437,7 @@ class GM_GodModeComponent : SCR_BaseGameModeComponent
             case GM_CommandTypes.SPAWN_INFANTRY:
                 m_SquadMgr.SpawnGroup(cmd.parameters, cmd.GetTargetVector()); break;
             case GM_CommandTypes.SPAWN_VEHICLE:
-                m_VehicleMgr.SpawnVehicle(cmd.parameters, cmd.GetTargetVector()); break;
+                m_VehicleMgr.SpawnCrewedVehicle(cmd.parameters, cmd.GetTargetVector()); break;
             case GM_CommandTypes.SPAWN_REINFORCEMENTS:
                 m_SquadMgr.SpawnReinforcements(cmd.parameters, cmd.GetTargetVector()); break;
 
@@ -497,6 +503,150 @@ class GM_GodModeComponent : SCR_BaseGameModeComponent
             m_aRecentEvents.Remove(0);
 
         m_aRecentEvents.Insert(evt);
+    }
+
+    // ═══════════════════════════════════════════════
+    // Terrain Context Collection (Priority 5)
+    // ═══════════════════════════════════════════════
+
+    protected ref array<ref GM_TerrainSample> CollectTerrainSamples(
+        ref array<ref GM_PlayerState> players,
+        ref array<ref GM_UnitState> enemyUnits)
+    {
+        ref array<ref GM_TerrainSample> samples = {};
+        ref array<vector> samplePoints = {};
+
+        // Sample around each player position
+        foreach (GM_PlayerState p : players)
+        {
+            samplePoints.Insert(p.position);
+            // Add cardinal direction samples 100m out
+            float offsets[] = {100, -100};
+            foreach (float ox : offsets)
+            {
+                samplePoints.Insert(Vector(p.position[0] + ox, 0, p.position[2]));
+                samplePoints.Insert(Vector(p.position[0], 0, p.position[2] + ox));
+            }
+        }
+
+        // Sample at key unit positions
+        foreach (GM_UnitState u : enemyUnits)
+        {
+            samplePoints.Insert(u.position);
+        }
+
+        // Sample midpoints between players and nearest units (likely engagement zones)
+        foreach (GM_PlayerState p : players)
+        {
+            foreach (GM_UnitState u : enemyUnits)
+            {
+                float dist = vector.Distance(p.position, u.position);
+                if (dist < 500) // Only sample nearby engagement zones
+                {
+                    vector mid = Vector(
+                        (p.position[0] + u.position[0]) * 0.5,
+                        0,
+                        (p.position[2] + u.position[2]) * 0.5
+                    );
+                    samplePoints.Insert(mid);
+                }
+            }
+        }
+
+        // Generate terrain samples (cap at 30 to limit payload)
+        int count = 0;
+        foreach (vector pt : samplePoints)
+        {
+            if (count >= 30) break;
+
+            GM_TerrainSample sample = new GM_TerrainSample();
+            sample.position = pt;
+
+            // Get terrain elevation
+            float surfaceY = GetGame().GetWorld().GetSurfaceY(pt[0], pt[2]);
+            sample.elevation = surfaceY;
+            sample.position[1] = surfaceY;
+
+            // Classify terrain type using trace queries
+            sample.terrain_type = ClassifyTerrain(pt, surfaceY);
+            sample.cover_density = EstimateCoverDensity(pt);
+
+            samples.Insert(sample);
+            count++;
+        }
+
+        return samples;
+    }
+
+    protected string ClassifyTerrain(vector pos, float elevation)
+    {
+        // Check for road nearby using trace
+        // Simple heuristic: flat areas near roads, elevation changes = hills
+        float nearbyY1 = GetGame().GetWorld().GetSurfaceY(pos[0] + 5, pos[2]);
+        float nearbyY2 = GetGame().GetWorld().GetSurfaceY(pos[0], pos[2] + 5);
+        float slopeDelta = Math.AbsFloat(elevation - nearbyY1) + Math.AbsFloat(elevation - nearbyY2);
+
+        if (slopeDelta > 3.0)
+            return "hill";
+
+        // Check for objects nearby (buildings, trees) via trace
+        vector start = pos;
+        start[1] = elevation + 1.5;
+        vector end = start;
+        end[1] = elevation + 15; // Check upward for canopy/buildings
+
+        TraceParam trace = new TraceParam();
+        trace.Start = start;
+        trace.End = end;
+        trace.Flags = TraceFlags.WORLD;
+
+        float hitFraction = GetGame().GetWorld().TraceMove(trace, null);
+        if (hitFraction < 1.0)
+        {
+            // Something above — likely trees or buildings
+            if (elevation < 2.0)
+                return "urban";
+            else
+                return "forest";
+        }
+
+        // Check if water
+        if (elevation < 0.5)
+            return "water";
+
+        return "open";
+    }
+
+    protected float EstimateCoverDensity(vector pos)
+    {
+        // Cast multiple horizontal traces to estimate nearby cover
+        int hits = 0;
+        int traces = 8;
+        float radius = 25.0;
+        float elevation = GetGame().GetWorld().GetSurfaceY(pos[0], pos[2]);
+
+        for (int i = 0; i < traces; i++)
+        {
+            float angle = i * (360.0 / traces) * Math.DEG2RAD;
+            vector start = pos;
+            start[1] = elevation + 1.0;
+            vector end = Vector(
+                pos[0] + Math.Cos(angle) * radius,
+                elevation + 1.0,
+                pos[2] + Math.Sin(angle) * radius
+            );
+
+            TraceParam trace = new TraceParam();
+            trace.Start = start;
+            trace.End = end;
+            trace.Flags = TraceFlags.WORLD | TraceFlags.ENTS;
+
+            float hitFraction = GetGame().GetWorld().TraceMove(trace, null);
+            if (hitFraction < 0.9)
+                hits++;
+        }
+
+        return hits / (float)traces;
     }
 
     // ═══════════════════════════════════════════════

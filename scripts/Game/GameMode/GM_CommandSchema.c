@@ -27,6 +27,11 @@ class GM_UnitState : JsonApiStruct
     bool is_suppressed;         // currently taking effective fire
     float time_in_current_order; // seconds executing current order
 
+    // Tactical posture fields
+    string formation;           // current formation
+    string combat_mode;         // current ROE
+    string morale;              // "strong", "steady", "shaky", "broken"
+
     void GM_UnitState()
     {
         RegV("unit_id");
@@ -44,6 +49,9 @@ class GM_UnitState : JsonApiStruct
         RegV("ammo_status");
         RegV("is_suppressed");
         RegV("time_in_current_order");
+        RegV("formation");
+        RegV("combat_mode");
+        RegV("morale");
     }
 }
 
@@ -107,6 +115,80 @@ class GM_TerrainSample : JsonApiStruct
     }
 }
 
+class GM_WeatherTacticalContext : JsonApiStruct
+{
+    float visibility_range_meters;
+    string audio_masking;
+    string sniper_effectiveness;
+    bool air_support_available;
+    string glare_advantage_direction;
+    string ambient_light_level;
+    bool is_night;
+    bool is_twilight;
+    string moon_phase;
+    float sun_bearing;
+
+    void GM_WeatherTacticalContext()
+    {
+        RegV("visibility_range_meters");
+        RegV("audio_masking");
+        RegV("sniper_effectiveness");
+        RegV("air_support_available");
+        RegV("glare_advantage_direction");
+        RegV("ambient_light_level");
+        RegV("is_night");
+        RegV("is_twilight");
+        RegV("moon_phase");
+        RegV("sun_bearing");
+    }
+}
+
+class GM_MissionState : JsonApiStruct
+{
+    string current_archetype;       // "patrol_ambush", "fob_defense", etc.
+    string current_phase;           // "deployment", "patrol", "contact", "engagement", etc.
+    float mission_progress;         // 0.0-1.0
+    float tension_level;            // 0.0-1.0
+    string alert_level;             // "green", "yellow", "orange", "red"
+    int wave_number;
+    string active_objective;
+    int total_enemy_kills;
+    int total_friendly_losses;
+    float force_ratio;
+
+    void GM_MissionState()
+    {
+        RegV("current_archetype");
+        RegV("current_phase");
+        RegV("mission_progress");
+        RegV("tension_level");
+        RegV("alert_level");
+        RegV("wave_number");
+        RegV("active_objective");
+        RegV("total_enemy_kills");
+        RegV("total_friendly_losses");
+        RegV("force_ratio");
+    }
+}
+
+class GM_AmbientState : JsonApiStruct
+{
+    int ambient_intensity;          // 0-3
+    int active_fires;
+    int active_smoke_columns;
+    bool artillery_active;
+    string battlefield_noise_level; // "quiet", "sporadic", "moderate", "heavy"
+
+    void GM_AmbientState()
+    {
+        RegV("ambient_intensity");
+        RegV("active_fires");
+        RegV("active_smoke_columns");
+        RegV("artillery_active");
+        RegV("battlefield_noise_level");
+    }
+}
+
 class GM_GameState : JsonApiStruct
 {
     ref array<ref GM_UnitState> friendly_units;
@@ -127,6 +209,15 @@ class GM_GameState : JsonApiStruct
     // Terrain context (Priority 5)
     ref array<ref GM_TerrainSample> terrain_samples;
 
+    // Mission engine state (for LLM mission-aware decisions)
+    ref GM_MissionState mission_state;
+
+    // Weather tactical overlay
+    ref GM_WeatherTacticalContext weather_tactical_context;
+
+    // Ambient battlefield state
+    ref GM_AmbientState ambient_state;
+
     void GM_GameState()
     {
         RegV("friendly_units");
@@ -144,6 +235,9 @@ class GM_GameState : JsonApiStruct
         RegV("total_spawned_groups");
         RegV("total_spawned_vehicles");
         RegV("terrain_samples");
+        RegV("mission_state");
+        RegV("weather_tactical_context");
+        RegV("ambient_state");
     }
 }
 
@@ -159,6 +253,11 @@ class GM_Command : JsonApiStruct
     string parameters;      // Command-specific params (JSON sub-object as string)
     string narrative;       // Flavor text shown to players
     string reasoning;       // LLM's tactical reasoning (debug/logging only)
+    string formation;       // "line", "column", "wedge", "staggered_column", "echelon_left", "echelon_right"
+    string combat_mode;     // "hold_fire", "fire_at_will", "return_fire"
+    string speed_mode;      // "walk", "run", "sprint"
+    string stance;          // "stand", "crouch", "prone"
+    string sync_group;      // Coordination group ID for multi-squad operations
 
     void GM_Command()
     {
@@ -168,6 +267,11 @@ class GM_Command : JsonApiStruct
         RegV("parameters");
         RegV("narrative");
         RegV("reasoning");
+        RegV("formation");
+        RegV("combat_mode");
+        RegV("speed_mode");
+        RegV("stance");
+        RegV("sync_group");
     }
 
     // Parse "123.4,56.7,890.1" → vector
@@ -203,6 +307,42 @@ class GM_Command : JsonApiStruct
             command_type == "patrol" || command_type == "retreat")
         {
             if (unit_id == "") return false;
+            if (target_position == "") return false;
+        }
+
+        // Advanced tactical commands need unit_id and target_position
+        if (command_type == "suppress" || command_type == "overwatch" ||
+            command_type == "breach" || command_type == "flank_left" ||
+            command_type == "flank_right" || command_type == "garrison" ||
+            command_type == "set_keyhole" || command_type == "establish_op" ||
+            command_type == "fighting_withdrawal" || command_type == "silent_move" ||
+            command_type == "bounding_overwatch" || command_type == "coordinated_operation")
+        {
+            if (unit_id == "") return false;
+            if (target_position == "") return false;
+        }
+
+        // Patrol variants need unit_id and target_position
+        if (command_type == "patrol_cloverleaf" || command_type == "patrol_zigzag")
+        {
+            if (unit_id == "") return false;
+            if (target_position == "") return false;
+        }
+
+        // Vehicle tactical commands need unit_id and target_position
+        if (command_type == "hull_down" || command_type == "overwatch_position" ||
+            command_type == "dismount_assault" || command_type == "cas_run" ||
+            command_type == "troop_insert" || command_type == "convoy_form" ||
+            command_type == "vehicle_screen" || command_type == "air_patrol")
+        {
+            if (unit_id == "") return false;
+            if (target_position == "") return false;
+        }
+
+        // Artillery / fire-support effects need target_position
+        if (command_type == "artillery_barrage" || command_type == "building_fire" ||
+            command_type == "distant_combat_ambience")
+        {
             if (target_position == "") return false;
         }
 
@@ -267,4 +407,73 @@ class GM_CommandTypes
     static const string RADIO_MESSAGE      = "radio_message";
     static const string OBJECTIVE_CREATE   = "objective_create";
     static const string OBJECTIVE_COMPLETE = "objective_complete";
+    static const string OBJECTIVE_FAIL     = "objective_fail";
+
+    // Fire Support
+    static const string MORTAR_STRIKE      = "mortar_strike";
+    static const string AIR_SUPPORT        = "air_support";
+
+    // Logistics
+    static const string SUPPLY_DROP        = "supply_drop";
+    static const string SPAWN_CONVOY       = "spawn_convoy";
+
+    // Fortification
+    static const string ESTABLISH_CHECKPOINT = "establish_checkpoint";
+    static const string LAY_MINES          = "lay_mines";
+    static const string SET_ROADBLOCK      = "set_roadblock";
+
+    // Markers
+    static const string SPAWN_MARKER       = "spawn_marker";
+
+    // Meta / Mission Control
+    static const string SET_ALERT_LEVEL    = "set_alert_level";
+    static const string ORDER_FORMATION    = "order_formation";
+    static const string START_SCENARIO     = "start_scenario";
+    static const string END_SCENARIO       = "end_scenario";
+
+    // Advanced Tactical
+    static const string SUPPRESS            = "suppress";
+    static const string OVERWATCH           = "overwatch";
+    static const string BREACH              = "breach";
+    static const string FLANK_LEFT          = "flank_left";
+    static const string FLANK_RIGHT         = "flank_right";
+    static const string GARRISON            = "garrison";
+    static const string SET_KEYHOLE         = "set_keyhole";
+    static const string ESTABLISH_OP        = "establish_op";
+    static const string FIGHTING_WITHDRAWAL = "fighting_withdrawal";
+    static const string SILENT_MOVE         = "silent_move";
+
+    // Patrol Variants
+    static const string PATROL_CLOVERLEAF   = "patrol_cloverleaf";
+    static const string PATROL_ZIGZAG       = "patrol_zigzag";
+
+    // Coordinated Operations
+    static const string BOUNDING_OVERWATCH  = "bounding_overwatch";
+    static const string COORDINATED_OP      = "coordinated_operation";
+
+    // Vehicle Tactical
+    static const string HULL_DOWN           = "hull_down";
+    static const string OVERWATCH_POSITION  = "overwatch_position";
+    static const string DISMOUNT_ASSAULT    = "dismount_assault";
+    static const string CAS_RUN             = "cas_run";
+    static const string TROOP_INSERT        = "troop_insert";
+    static const string CONVOY_FORM         = "convoy_form";
+    static const string VEHICLE_SCREEN      = "vehicle_screen";
+    static const string AIR_PATROL          = "air_patrol";
+
+    // Advanced Environment
+    static const string SET_WEATHER_PROGRESSION = "set_weather_progression";
+    static const string SET_TACTICAL_LIGHTING   = "set_tactical_lighting";
+    static const string SET_AMBIENT_INTENSITY   = "set_ambient_intensity";
+    static const string ARTILLERY_BARRAGE       = "artillery_barrage";
+    static const string BUILDING_FIRE           = "building_fire";
+    static const string DISTANT_COMBAT          = "distant_combat_ambience";
+
+    // Narrative Advanced
+    static const string RADIO_COMMS         = "radio_comms";
+    static const string INTEL_FEED          = "intel_feed";
+    static const string FACTION_COMMS       = "faction_comms";
+    static const string PLAYER_ACK          = "player_acknowledgment";
+    static const string PACING_DIRECTIVE    = "pacing_directive";
+    static const string ENVIRONMENT_MOOD    = "environment_mood";
 }

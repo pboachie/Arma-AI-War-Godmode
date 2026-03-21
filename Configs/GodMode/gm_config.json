@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "2.0.0",
   "middleware": {
     "url": "http://localhost:8000",
     "health_endpoint": "/health"
@@ -15,21 +15,308 @@
     "player_safe_cleanup_radius_meters": 100
   },
   "scaling": {
-    "comment": "Automatic limits based on player count",
-    "0_players":  { "max_squads": 10, "max_vehicles": 5,  "update_interval": 30 },
-    "1-4_players": { "max_squads": 15, "max_vehicles": 8,  "update_interval": 30 },
-    "5-12_players":{ "max_squads": 30, "max_vehicles": 15, "update_interval": 45 },
-    "13+_players": { "max_squads": 50, "max_vehicles": 20, "update_interval": 60 }
+    "0_players": { "max_squads": 10, "max_vehicles": 5, "update_interval": 30 },
+    "1-4_players": { "max_squads": 15, "max_vehicles": 8, "update_interval": 30 },
+    "5-12_players": { "max_squads": 30, "max_vehicles": 15, "update_interval": 45 },
+    "13+_players": { "max_squads": 50, "max_vehicles": 20, "update_interval": 60 },
+    "performance_aware": true,
+    "zone_based": true,
+    "team_coordination_scaling": true
   },
   "weather_ids": ["Clear", "Cloudy", "Overcast", "Rainy", "Storm", "Foggy"],
-  "vehicle_types": {
-    "us": ["m998_humvee", "m998_humvee_mg", "m151_jeep", "m35_truck"],
-    "ussr": ["uaz469", "uaz469_mg", "btr70", "ural_truck", "bmp1", "t72"],
-    "helicopters": ["uh1h"]
-  },
   "squad_types": {
-    "us": ["us_rifle_squad", "us_fire_team", "us_mg_team", "us_at_team", "us_sniper_team"],
-    "ussr": ["ussr_rifle_squad", "ussr_fire_team", "ussr_mg_team", "ussr_at_team", "ussr_sniper_team"],
-    "fia": ["fia_squad"]
-  }
+    "us": [
+      "us_rifle_squad",
+      "us_fire_team",
+      "us_mg_team",
+      "us_at_team",
+      "us_sniper_team",
+      "us_recon_team",
+      "us_mortar_team",
+      "us_engineer_squad",
+      "us_hq_element",
+      "us_medic_team",
+      "us_fist_team"
+    ],
+    "ussr": [
+      "ussr_rifle_squad",
+      "ussr_fire_team",
+      "ussr_mg_team",
+      "ussr_at_team",
+      "ussr_sniper_team",
+      "ussr_recon_team",
+      "ussr_mortar_team",
+      "ussr_engineer_squad",
+      "ussr_hq_element",
+      "ussr_medic_team",
+      "ussr_rpg_team"
+    ],
+    "fia": [
+      "fia_squad",
+      "fia_recon_cell",
+      "fia_sapper_cell",
+      "fia_mortar_crew",
+      "fia_technical"
+    ]
+  },
+  "vehicle_types": {
+    "us": [
+      "m998_humvee",
+      "m998_humvee_mg",
+      "m151_jeep",
+      "m35_truck",
+      "m113",
+      "m60a3",
+      "m923_ammo",
+      "m923_fuel",
+      "m577_command"
+    ],
+    "ussr": [
+      "uaz469",
+      "uaz469_mg",
+      "btr70",
+      "ural_truck",
+      "bmp1",
+      "t72",
+      "brdm2",
+      "brdm2_atgm",
+      "ural_ammo",
+      "ural_fuel",
+      "ural_medical",
+      "zsu_23_4",
+      "mt_lb"
+    ],
+    "helicopters": [
+      "uh1h",
+      "mi8",
+      "mi24",
+      "ah1"
+    ],
+    "static_weapons": [
+      "dshk_tripod",
+      "spg9_tripod",
+      "ags17_tripod",
+      "m2_tripod",
+      "tow_launcher"
+    ]
+  },
+  "faction_profiles": {
+    "ussr": {
+      "display_name": "Soviet Armed Forces",
+      "doctrine": "massed_conventional",
+      "aggression": 0.75,
+      "discipline": 0.85,
+      "retreat_threshold_health_pct": 25,
+      "preferred_tactics": [
+        "frontal_assault",
+        "envelopment",
+        "artillery_suppression",
+        "massed_armor",
+        "prepared_defense"
+      ],
+      "communication_style": {
+        "formality": "high",
+        "language_flavor": "soviet_military",
+        "callsign_format": "color_number",
+        "example_callsigns": ["Krasny-1", "Sokol-2", "Buran-3", "Shtorm-4", "Volk-5"],
+        "radio_discipline": "strict"
+      },
+      "narrative_descriptors": [
+        "disciplined",
+        "methodical",
+        "overwhelming_force",
+        "doctrine_driven",
+        "relentless"
+      ]
+    },
+    "us": {
+      "display_name": "United States Army",
+      "doctrine": "maneuver_warfare",
+      "aggression": 0.6,
+      "discipline": 0.8,
+      "retreat_threshold_health_pct": 35,
+      "preferred_tactics": [
+        "fire_and_maneuver",
+        "flanking",
+        "combined_arms",
+        "air_support_integration",
+        "tactical_withdrawal"
+      ],
+      "communication_style": {
+        "formality": "medium",
+        "language_flavor": "nato_standard",
+        "callsign_format": "phonetic_number",
+        "example_callsigns": ["Bravo-6", "Alpha-2", "Charlie-1", "Reaper-3", "Mustang-5"],
+        "radio_discipline": "professional"
+      },
+      "narrative_descriptors": [
+        "adaptive",
+        "well_equipped",
+        "combined_arms",
+        "professional",
+        "initiative_driven"
+      ]
+    },
+    "fia": {
+      "display_name": "Freedom and Independence Army",
+      "doctrine": "guerrilla",
+      "aggression": 0.45,
+      "discipline": 0.5,
+      "retreat_threshold_health_pct": 50,
+      "preferred_tactics": [
+        "ambush",
+        "hit_and_run",
+        "ied_placement",
+        "sniper_harassment",
+        "blend_with_civilians"
+      ],
+      "communication_style": {
+        "formality": "low",
+        "language_flavor": "informal_militia",
+        "callsign_format": "nickname",
+        "example_callsigns": ["Hawk", "Ghost", "Razor", "Shadow", "Viper"],
+        "radio_discipline": "loose"
+      },
+      "narrative_descriptors": [
+        "resourceful",
+        "unpredictable",
+        "desperate",
+        "local_knowledge",
+        "asymmetric"
+      ]
+    }
+  },
+  "radio_channels": {
+    "command_net": {
+      "description": "Primary command and control channel for high-level orders and situation reports",
+      "callsigns": ["Overlord", "Warlord", "Sunray", "Keystone"],
+      "formality": "high"
+    },
+    "squad_net": {
+      "description": "Tactical channel for squad-level communication and coordination",
+      "callsigns": ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"],
+      "formality": "medium"
+    },
+    "enemy_intercept": {
+      "description": "Intercepted enemy communications providing intelligence and atmosphere",
+      "callsigns": ["Krasny", "Sokol", "Buran", "Shtorm"],
+      "formality": "high"
+    },
+    "support_net": {
+      "description": "Fire support and logistics coordination channel",
+      "callsigns": ["Hammer", "Anvil", "Dustoff", "Longbow", "Dealer"],
+      "formality": "high"
+    }
+  },
+  "pacing": {
+    "min_quiet_between_contacts_seconds": 180,
+    "max_quiet_between_contacts_seconds": 480,
+    "min_contact_duration_seconds": 120,
+    "max_sustained_crisis_seconds": 180,
+    "escalation_rate": 0.15,
+    "deescalation_rate": 0.25,
+    "tension_floor": 0.05,
+    "tension_ceiling": 1.0
+  },
+  "mission_engine": {
+    "enabled": true,
+    "default_archetype": "patrol_ambush",
+    "escalation_curve": "standard_bell",
+    "max_mission_duration_seconds": 3600,
+    "auto_chain_missions": true,
+    "auto_scenario_selection": true,
+    "default_scenario": "morning_patrol",
+    "scenario_rotation": [
+      "morning_patrol",
+      "convoy_gauntlet",
+      "night_recon",
+      "last_stand",
+      "collision_course",
+      "the_hunt"
+    ],
+    "mission_transition_delay_seconds": 120,
+    "max_minefields": 5,
+    "max_mines_per_field": 12
+  },
+  "alert_levels": {
+    "green": {
+      "description": "Peacetime posture. Minimal threat expected. Routine patrols and standard readiness.",
+      "spawn_multiplier": 0.5
+    },
+    "yellow": {
+      "description": "Elevated awareness. Possible threat detected. Increased patrol frequency and observation.",
+      "spawn_multiplier": 0.75
+    },
+    "orange": {
+      "description": "High alert. Confirmed enemy activity in area. Defensive positions manned, reserves on standby.",
+      "spawn_multiplier": 1.0
+    },
+    "red": {
+      "description": "Active combat. Engagement underway or imminent. Full mobilization, all assets committed.",
+      "spawn_multiplier": 1.5
+    }
+  },
+  "weather_moods": {
+    "dread": {
+      "weather": "Foggy",
+      "time_preference": "pre_dawn",
+      "wind": "still",
+      "narrative_tone": "Thick fog blankets the landscape. Visibility is near zero. Every sound is amplified in the silence."
+    },
+    "fury": {
+      "weather": "Storm",
+      "time_preference": "night",
+      "wind": "strong_gusting",
+      "narrative_tone": "Thunder masks gunfire. Rain hammers down in sheets. Lightning briefly illuminates the chaos."
+    },
+    "calm_before": {
+      "weather": "Clear",
+      "time_preference": "early_morning",
+      "wind": "light_breeze",
+      "narrative_tone": "An unsettling stillness hangs in the air. The sky is clear, the wind gentle. It feels wrong."
+    },
+    "aftermath": {
+      "weather": "Overcast",
+      "time_preference": "late_afternoon",
+      "wind": "moderate",
+      "narrative_tone": "Grey skies press down on the scarred terrain. Smoke drifts lazily from smoldering wreckage."
+    },
+    "hope": {
+      "weather": "Clear",
+      "time_preference": "sunrise",
+      "wind": "calm",
+      "narrative_tone": "Golden light spills across the horizon. For a moment, the war feels distant and unreal."
+    },
+    "isolation": {
+      "weather": "Overcast",
+      "time_preference": "midnight",
+      "wind": "cold_steady",
+      "narrative_tone": "Heavy clouds blot out the stars. The darkness is absolute. You are alone with the wind."
+    }
+  },
+  "command_types": {
+    "movement_combat": ["move", "attack", "defend", "patrol", "set_ambush", "seek_and_destroy", "retreat", "order_formation"],
+    "spawning": ["spawn_infantry", "spawn_vehicle", "spawn_reinforcements", "spawn_convoy"],
+    "environment": ["set_weather", "set_time", "set_wind", "thunder_near", "play_sound"],
+    "effects": ["explosion", "smoke", "flare"],
+    "fire_support": ["mortar_strike", "air_support"],
+    "logistics": ["supply_drop"],
+    "fortification": ["establish_checkpoint", "lay_mines", "set_roadblock"],
+    "cleanup": ["cleanup_area", "cleanup_dead", "despawn_unit"],
+    "narrative": ["radio_message", "objective_create", "objective_complete", "objective_fail", "spawn_marker"],
+    "meta": ["set_alert_level", "start_scenario", "end_scenario"]
+  },
+  "force_compositions": {
+    "scout_screen": { "infantry": ["ussr_fire_team", "ussr_fire_team"], "vehicles": ["uaz469"], "power": 0.2 },
+    "reinforced_patrol": { "infantry": ["ussr_rifle_squad", "ussr_mg_team"], "vehicles": ["uaz469_mg"], "power": 0.4 },
+    "ambush_force": { "infantry": ["ussr_fire_team", "ussr_fire_team", "ussr_mg_team", "ussr_sniper_team"], "vehicles": [], "power": 0.5 },
+    "motorized_platoon": { "infantry": ["ussr_rifle_squad", "ussr_rifle_squad", "ussr_rifle_squad", "ussr_mg_team"], "vehicles": ["btr70", "btr70"], "power": 0.7 },
+    "mechanized_assault": { "infantry": ["ussr_rifle_squad", "ussr_rifle_squad", "ussr_rifle_squad", "ussr_mg_team", "ussr_at_team"], "vehicles": ["bmp1", "bmp1", "t72"], "power": 1.0 },
+    "anti_armor_team": { "infantry": ["ussr_at_team", "ussr_at_team", "ussr_fire_team"], "vehicles": ["uaz469"], "power": 0.4 },
+    "garrison_defense": { "infantry": ["ussr_rifle_squad", "ussr_rifle_squad", "ussr_mg_team", "ussr_mg_team", "ussr_at_team", "ussr_sniper_team"], "vehicles": ["btr70"], "power": 0.8 },
+    "quick_reaction_force": { "infantry": ["ussr_rifle_squad", "ussr_fire_team"], "vehicles": ["btr70", "uaz469_mg"], "power": 0.5 },
+    "pursuit_force": { "infantry": ["ussr_fire_team", "ussr_fire_team"], "vehicles": ["uaz469_mg", "uaz469_mg", "btr70"], "power": 0.5 }
+  },
+  "escalation_curves": ["standard_bell", "slow_burn", "wave_assault", "ambush_spike", "rolling_thunder"],
+  "mission_archetypes": ["patrol_ambush", "convoy_escort", "area_denial", "search_destroy", "vip_extraction", "fob_defense", "recon", "counter_attack", "meeting_engagement"]
 }

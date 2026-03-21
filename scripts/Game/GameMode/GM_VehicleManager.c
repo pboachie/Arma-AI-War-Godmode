@@ -219,6 +219,101 @@ class GM_VehicleManager
     void SetMaxVehicles(int max) { m_iMaxVehicles = max; }
 
     // ═══════════════════════════════════════════════
+    // Vehicle Orders (requires crew groups)
+    // ═══════════════════════════════════════════════
+
+    protected ref map<string, SCR_AIGroup> m_mVehicleGroups = new map<string, SCR_AIGroup>();
+
+    void OrderVehicleMove(string vehicleId, vector destination)
+    {
+        SCR_AIGroup group;
+        if (!m_mVehicleGroups.Find(vehicleId, group) || !group)
+        {
+            Print("[GodMode:Vehicle] No crew group for " + vehicleId + ", cannot order move", LogLevel.WARNING);
+            return;
+        }
+
+        EntitySpawnParams params = new EntitySpawnParams();
+        params.TransformMode = ETransformMode.WORLD;
+        params.Transform[3] = destination;
+        params.Transform[3][1] = GetGame().GetWorld().GetSurfaceY(destination[0], destination[2]);
+
+        Resource wpRes = Resource.Load("{22A875E30470BD4F}Prefabs/AI/Waypoints/AIWaypoint_Move.et");
+        if (!wpRes || !wpRes.IsValid()) return;
+
+        IEntity wpEnt = GetGame().SpawnEntityPrefab(wpRes, GetGame().GetWorld(), params);
+        AIWaypoint wp = AIWaypoint.Cast(wpEnt);
+        if (wp)
+        {
+            wp.SetCompletionRadius(30);
+            group.AddWaypoint(wp);
+        }
+
+        Print("[GodMode:Vehicle] " + vehicleId + " → MOVE to " + destination.ToString(false));
+    }
+
+    void OrderVehicleDefend(string vehicleId, vector position)
+    {
+        SCR_AIGroup group;
+        if (!m_mVehicleGroups.Find(vehicleId, group) || !group) return;
+
+        EntitySpawnParams params = new EntitySpawnParams();
+        params.TransformMode = ETransformMode.WORLD;
+        params.Transform[3] = position;
+        params.Transform[3][1] = GetGame().GetWorld().GetSurfaceY(position[0], position[2]);
+
+        Resource wpRes = Resource.Load("{B3E7B883E4D9E678}Prefabs/AI/Waypoints/AIWaypoint_Defend.et");
+        if (!wpRes || !wpRes.IsValid()) return;
+
+        IEntity wpEnt = GetGame().SpawnEntityPrefab(wpRes, GetGame().GetWorld(), params);
+        AIWaypoint wp = AIWaypoint.Cast(wpEnt);
+        if (wp)
+        {
+            wp.SetCompletionRadius(50);
+            group.AddWaypoint(wp);
+        }
+
+        Print("[GodMode:Vehicle] " + vehicleId + " → DEFEND at " + position.ToString(false));
+    }
+
+    // Register a crew group for an already-spawned vehicle
+    void RegisterVehicleGroup(string vehicleId, SCR_AIGroup group)
+    {
+        if (group) m_mVehicleGroups.Set(vehicleId, group);
+    }
+
+    // Spawn a convoy of vehicles in formation
+    void SpawnConvoy(string convoyId, ref array<string> vehicleTypes, vector startPos,
+                      vector destination, float spacing)
+    {
+        if (spacing <= 0) spacing = 75;
+
+        // Calculate direction vector
+        vector dir = destination - startPos;
+        float len = dir.Length();
+        if (len < 1) return;
+        dir = dir / len; // normalize
+
+        for (int i = 0; i < vehicleTypes.Count(); i++)
+        {
+            // Space vehicles along the route behind the start position
+            vector pos = startPos;
+            float offset = i * spacing;
+            pos[0] = pos[0] - dir[0] * offset;
+            pos[2] = pos[2] - dir[2] * offset;
+
+            string vid = SpawnCrewedVehicle(vehicleTypes[i], pos, "ussr");
+            if (vid == "") continue;
+
+            // Give the vehicle a move order to the destination
+            // Slight delay to ensure crew is loaded
+            GetGame().GetCallqueue().CallLater(OrderVehicleMove, 2000 + i * 500, false, vid, destination);
+        }
+
+        Print("[GodMode:Vehicle] Convoy " + convoyId + " spawned: " + vehicleTypes.Count() + " vehicles, spacing " + spacing + "m");
+    }
+
+    // ═══════════════════════════════════════════════
     // Prefab Lookup
     // ═══════════════════════════════════════════════
     // NOTE: GUIDs below are representative. You MUST verify these in the
@@ -284,6 +379,69 @@ class GM_VehicleManager
             case "helicopter":
             case "heli":
                 return "{E1C9450B2E9A1E38}Prefabs/Vehicles/Helicopters/UH1H/UH1H.et";
+
+            // ── USSR Extended ──
+            case "brdm2":
+            case "brdm":
+                return "{1B7E1C1DE3B96050}Prefabs/Vehicles/Wheeled/BTR70/BTR70.et"; // placeholder — verify GUID
+            case "brdm2_atgm":
+                return "{1B7E1C1DE3B96050}Prefabs/Vehicles/Wheeled/BTR70/BTR70.et"; // placeholder — verify GUID
+            case "ural_ammo":
+            case "ammo_truck":
+                return "{A6A4292F62F8C82C}Prefabs/Vehicles/Wheeled/Ural4320/Ural4320.et"; // placeholder
+            case "ural_fuel":
+            case "fuel_truck":
+                return "{A6A4292F62F8C82C}Prefabs/Vehicles/Wheeled/Ural4320/Ural4320.et"; // placeholder
+            case "ural_medical":
+            case "medical_truck":
+                return "{A6A4292F62F8C82C}Prefabs/Vehicles/Wheeled/Ural4320/Ural4320.et"; // placeholder
+            case "zsu_23_4":
+            case "zsu":
+            case "shilka":
+                return "{25DFE68DAE77A9AF}Prefabs/Vehicles/Tracked/BMP1/BMP1.et"; // placeholder — verify GUID
+            case "mt_lb":
+            case "mtlb":
+                return "{25DFE68DAE77A9AF}Prefabs/Vehicles/Tracked/BMP1/BMP1.et"; // placeholder — verify GUID
+
+            // ── US Extended ──
+            case "m113":
+                return "{5D63BFCD0CF5171D}Prefabs/Vehicles/Wheeled/M998/M998_MERDC.et"; // placeholder — verify GUID
+            case "m60a3":
+            case "m60":
+                return "{5D63BFCD0CF5171D}Prefabs/Vehicles/Wheeled/M998/M998_MERDC.et"; // placeholder — verify GUID
+            case "m923_ammo":
+            case "us_ammo_truck":
+                return "{3A3B42B17D4CDFE2}Prefabs/Vehicles/Wheeled/M35A2/M35A2.et"; // placeholder
+            case "m923_fuel":
+            case "us_fuel_truck":
+                return "{3A3B42B17D4CDFE2}Prefabs/Vehicles/Wheeled/M35A2/M35A2.et"; // placeholder
+
+            // ── Extended Helicopters ──
+            case "mi8":
+            case "hip":
+                return "{E1C9450B2E9A1E38}Prefabs/Vehicles/Helicopters/UH1H/UH1H.et"; // placeholder — verify GUID
+            case "mi24":
+            case "hind":
+                return "{E1C9450B2E9A1E38}Prefabs/Vehicles/Helicopters/UH1H/UH1H.et"; // placeholder — verify GUID
+            case "ah1":
+            case "cobra":
+                return "{E1C9450B2E9A1E38}Prefabs/Vehicles/Helicopters/UH1H/UH1H.et"; // placeholder — verify GUID
+
+            // ── Static Weapons ──
+            case "dshk_tripod":
+            case "dshk":
+                return "{2B43AF0BE6F3ACED}Prefabs/Vehicles/Wheeled/UAZ469/UAZ469.et"; // placeholder — verify GUID
+            case "spg9_tripod":
+            case "spg9":
+                return "{2B43AF0BE6F3ACED}Prefabs/Vehicles/Wheeled/UAZ469/UAZ469.et"; // placeholder — verify GUID
+            case "ags17_tripod":
+            case "ags17":
+                return "{2B43AF0BE6F3ACED}Prefabs/Vehicles/Wheeled/UAZ469/UAZ469.et"; // placeholder — verify GUID
+            case "m2_tripod":
+                return "{EF93C920FF4B2ED5}Prefabs/Vehicles/Wheeled/M151A2/M151A2.et"; // placeholder — verify GUID
+            case "tow_launcher":
+            case "tow":
+                return "{EF93C920FF4B2ED5}Prefabs/Vehicles/Wheeled/M151A2/M151A2.et"; // placeholder — verify GUID
 
             default:
                 Print("[GodMode:Vehicle] Unknown vehicle type: '" + type + "', falling back to UAZ469", LogLevel.WARNING);

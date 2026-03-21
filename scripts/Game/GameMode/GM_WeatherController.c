@@ -280,4 +280,275 @@ class GM_WeatherController
     float GetWindSpeed() { return m_fWindSpeed; }
     float GetWindDirection() { return m_fWindDirection; }
     bool IsWindOverrideActive() { return m_bWindOverrideActive; }
+
+    // ═══════════════════════════════════════════════
+    // Weather Progression System
+    // ═══════════════════════════════════════════════
+
+    protected ref array<string> m_aWeatherQueue;
+    protected int m_iQueueIndex;
+    protected float m_fProgressionStepTimer;
+    protected float m_fProgressionStepDuration;
+    protected bool m_bProgressionActive;
+
+    // Ordered severity scale for computing intermediate states
+    static const ref array<string> SEVERITY_ORDER = {"Clear", "Cloudy", "Overcast", "Rainy", "Storm"};
+
+    void StartWeatherProgression(string targetWeather, float totalMinutes, bool thenClear)
+    {
+        m_aWeatherQueue = {};
+        int fromIdx = FindSeverityIndex(m_sCurrentWeather);
+        int toIdx = FindSeverityIndex(targetWeather);
+
+        // Handle fog as a branch off the main severity scale
+        if (targetWeather == "Foggy")
+        {
+            if (fromIdx < 1) m_aWeatherQueue.Insert("Cloudy");
+            if (fromIdx < 2) m_aWeatherQueue.Insert("Overcast");
+            m_aWeatherQueue.Insert("Foggy");
+        }
+        else if (fromIdx >= 0 && toIdx >= 0)
+        {
+            int step = (toIdx > fromIdx) ? 1 : -1;
+            for (int i = fromIdx + step; ; i += step)
+            {
+                m_aWeatherQueue.Insert(SEVERITY_ORDER[i]);
+                if (i == toIdx) break;
+            }
+        }
+        else
+        {
+            m_aWeatherQueue.Insert(targetWeather);
+        }
+
+        // If thenClear, append the return path
+        if (thenClear && targetWeather != "Clear")
+        {
+            int clearIdx = FindSeverityIndex("Clear");
+            int currentEnd = FindSeverityIndex(targetWeather);
+            if (currentEnd > 0 && clearIdx >= 0)
+            {
+                for (int j = currentEnd - 1; j >= clearIdx; j--)
+                    m_aWeatherQueue.Insert(SEVERITY_ORDER[j]);
+            }
+        }
+
+        if (m_aWeatherQueue.Count() == 0) return;
+
+        m_fProgressionStepDuration = (totalMinutes * 60) / m_aWeatherQueue.Count();
+        m_iQueueIndex = 0;
+        m_fProgressionStepTimer = 0;
+        m_bProgressionActive = true;
+
+        Print("[GodMode:Weather] Progression started → " + targetWeather
+              + " over " + totalMinutes + "min (" + m_aWeatherQueue.Count() + " steps)");
+    }
+
+    // Call this from EOnFrame
+    void TickProgression(float deltaTime)
+    {
+        if (!m_bProgressionActive) return;
+        m_fProgressionStepTimer += deltaTime;
+
+        if (m_fProgressionStepTimer >= m_fProgressionStepDuration && m_iQueueIndex < m_aWeatherQueue.Count())
+        {
+            string next = m_aWeatherQueue[m_iQueueIndex];
+            SetWeather(next, m_fProgressionStepDuration * 0.8, m_fProgressionStepDuration, false);
+            m_iQueueIndex++;
+            m_fProgressionStepTimer = 0;
+
+            Print("[GodMode:Weather] Progression step " + m_iQueueIndex + "/" + m_aWeatherQueue.Count() + " → " + next);
+
+            if (m_iQueueIndex >= m_aWeatherQueue.Count())
+            {
+                m_bProgressionActive = false;
+                Print("[GodMode:Weather] Progression complete");
+            }
+        }
+    }
+
+    bool IsProgressionActive() { return m_bProgressionActive; }
+
+    protected int FindSeverityIndex(string weather)
+    {
+        for (int i = 0; i < SEVERITY_ORDER.Count(); i++)
+        {
+            if (SEVERITY_ORDER[i] == weather) return i;
+        }
+        return -1; // Foggy or unknown
+    }
+
+    // ═══════════════════════════════════════════════
+    // Tactical Weather Context (for SITREP enrichment)
+    // ═══════════════════════════════════════════════
+
+    float GetVisibilityRange()
+    {
+        switch (m_sCurrentWeather)
+        {
+            case "Clear":    return 2000;
+            case "Cloudy":   return 1500;
+            case "Overcast": return 1000;
+            case "Rainy":    return 500;
+            case "Storm":    return 300;
+            case "Foggy":    return 100;
+        }
+        return 2000;
+    }
+
+    string GetAudioMasking()
+    {
+        switch (m_sCurrentWeather)
+        {
+            case "Storm":  return "high";
+            case "Rainy":  return "moderate";
+            case "Foggy":  return "low";
+            default:       return "none";
+        }
+    }
+
+    string GetSniperEffectiveness()
+    {
+        float vis = GetVisibilityRange();
+        if (m_fWindSpeed > 10) vis *= 0.7;
+
+        if (vis >= 1500) return "full";
+        if (vis >= 800)  return "degraded";
+        if (vis >= 300)  return "severely_degraded";
+        return "impossible";
+    }
+
+    bool IsAirSupportAvailable()
+    {
+        return (m_sCurrentWeather != "Storm" && m_sCurrentWeather != "Foggy");
+    }
+
+    // Sun bearing approximation for tactical glare advantage
+    float GetSunBearing()
+    {
+        float tod = GetTimeOfDay();
+        if (tod >= 6 && tod <= 18)
+            return 90 + ((tod - 6) / 12.0) * 180;
+        return -1; // below horizon
+    }
+
+    string GetGlareAdvantageDirection()
+    {
+        float bearing = GetSunBearing();
+        if (bearing < 0) return "none";
+        if (bearing >= 45 && bearing < 135) return "east";
+        if (bearing >= 135 && bearing < 225) return "south";
+        if (bearing >= 225 && bearing < 315) return "west";
+        return "north";
+    }
+
+    string GetAmbientLightLevel()
+    {
+        if (IsNightTime())
+        {
+            if (m_sCurrentWeather == "Clear") return "dim";
+            return "dark";
+        }
+        if (m_sCurrentWeather == "Storm" || m_sCurrentWeather == "Foggy") return "dim";
+        return "bright";
+    }
+
+    // ═══════════════════════════════════════════════
+    // Tactical Lighting Presets
+    // ═══════════════════════════════════════════════
+
+    void SetTacticalLighting(string preset, float transitionSeconds)
+    {
+        transitionSeconds = Math.Clamp(transitionSeconds, 5, 300);
+
+        if (preset == "sun_glare_east") SetTimeOfDay(7.5);
+        else if (preset == "sun_glare_west") SetTimeOfDay(17.5);
+        else if (preset == "golden_hour") SetTimeOfDay(18.0);
+        else if (preset == "blue_hour") SetTimeOfDay(19.5);
+        else if (preset == "moonlit_night")
+        {
+            SetTimeOfDay(23.0);
+            SetWeather("Clear", 30, 600, true);
+        }
+        else if (preset == "pitch_black")
+        {
+            SetTimeOfDay(2.0);
+            SetWeather("Overcast", 30, 600, true);
+        }
+        else if (preset == "dawn_assault") SetTimeOfDay(5.5);
+        else
+            Print("[GodMode:Weather] Unknown lighting preset: " + preset, LogLevel.WARNING);
+
+        Print("[GodMode:Weather] Tactical lighting → " + preset);
+    }
+
+    // Gradual time transition (time lapse effect)
+    void TransitionTimeTo(float targetHours, float realSeconds)
+    {
+        float currentTime = GetTimeOfDay();
+        float delta = targetHours - currentTime;
+        int steps = Math.Max(1, Math.Floor(realSeconds / 5.0));
+        float stepSize = delta / steps;
+
+        for (int i = 1; i <= steps; i++)
+        {
+            float t = currentTime + (stepSize * i);
+            if (t < 0) t += 24;
+            if (t >= 24) t -= 24;
+
+            GetGame().GetCallqueue().CallLater(SetTimeOfDay, i * 5000, false, t);
+        }
+
+        Print("[GodMode:Weather] Time transition " + currentTime + " → " + targetHours + " over " + realSeconds + "s");
+    }
+
+    // ═══════════════════════════════════════════════
+    // Environment Mood (composite weather + time + wind)
+    // ═══════════════════════════════════════════════
+
+    void SetEnvironmentMood(string mood)
+    {
+        if (mood == "dread")
+        {
+            StartWeatherProgression("Foggy", 2, false);
+            TransitionTimeTo(4.0, 120);
+            SetWindDirect(3, 45);
+        }
+        else if (mood == "fury")
+        {
+            StartWeatherProgression("Storm", 1, false);
+            SetWindDirect(18, Math.RandomFloat(0, 360));
+        }
+        else if (mood == "calm_before")
+        {
+            SetWeather("Cloudy", 60, 600, true);
+            TransitionTimeTo(17.5, 60);
+            SetWindDirect(1, 180);
+        }
+        else if (mood == "aftermath")
+        {
+            StartWeatherProgression("Clear", 5, false);
+            TransitionTimeTo(8.0, 120);
+            SetWindDirect(4, 90);
+        }
+        else if (mood == "hope")
+        {
+            SetWeather("Clear", 30, 600, true);
+            TransitionTimeTo(6.0, 60);
+            SetWindDirect(2, 0);
+        }
+        else if (mood == "isolation")
+        {
+            SetWeather("Foggy", 45, 600, true);
+            SetWeather("Rainy", 60, 300, true);
+            TransitionTimeTo(1.0, 60);
+            SetWindDirect(8, 270);
+        }
+        else
+        {
+            Print("[GodMode:Weather] Unknown mood: " + mood, LogLevel.WARNING);
+        }
+
+        Print("[GodMode:Weather] Environment mood → " + mood);
+    }
 }

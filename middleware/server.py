@@ -20,6 +20,7 @@ Run:  uvicorn server:app --host 0.0.0.0 --port 8000
 """
 
 import asyncio
+import gzip
 import json
 import math
 import time
@@ -28,6 +29,7 @@ import os
 import re
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException
@@ -90,6 +92,119 @@ LLM_RETRY_JITTER = float(os.getenv("LLM_RETRY_JITTER", "0.5"))           # 0-1 r
 LLM_RATE_LIMIT_RPM = int(os.getenv("LLM_RATE_LIMIT_RPM", "20"))          # requests/minute
 
 import random as _random
+
+
+# ═══════════════════════════════════════════════════════════
+# Replay Recording
+# ═══════════════════════════════════════════════════════════
+
+_REPLAY_DIR = Path(os.path.dirname(__file__)) / "replays"
+
+
+class ReplayRecorder:
+    def __init__(self):
+        self._file = None
+        self._event_count = 0
+
+    def ensure_open(self, session_id: str):
+        if self._file is None:
+            _REPLAY_DIR.mkdir(parents=True, exist_ok=True)
+            path = _REPLAY_DIR / f"{session_id}_{int(time.time())}.jsonl.gz"
+            self._file = gzip.open(path, "at", encoding="utf-8")
+            log.info("Replay recording to: %s", path)
+
+    def record(self, event_type: str, data: dict, session_id: str = "default"):
+        self.ensure_open(session_id)
+        entry = {"type": event_type, "ts": time.time(), "data": data}
+        self._file.write(json.dumps(entry, default=str) + "\n")
+        self._file.flush()
+        self._event_count += 1
+
+    def close(self):
+        if self._file:
+            self._file.close()
+            self._file = None
+
+
+_replay = ReplayRecorder()
+
+
+# ═══════════════════════════════════════════════════════════
+# Vehicle Registry
+# ═══════════════════════════════════════════════════════════
+
+VEHICLE_REGISTRY = {
+    "uaz469": {"faction": "ussr", "role": "recon", "threat": 1, "cost": 1},
+    "uaz469_mg": {"faction": "ussr", "role": "fire_support", "threat": 2, "cost": 2},
+    "brdm2": {"faction": "ussr", "role": "recon_screen", "threat": 3, "cost": 3},
+    "brdm2_atgm": {"faction": "ussr", "role": "anti_armor", "threat": 5, "cost": 5},
+    "btr70": {"faction": "ussr", "role": "mechanized_transport", "threat": 4, "cost": 4},
+    "bmp1": {"faction": "ussr", "role": "mechanized_assault", "threat": 6, "cost": 6},
+    "t72": {"faction": "ussr", "role": "armor", "threat": 10, "cost": 10},
+    "mt_lb": {"faction": "ussr", "role": "transport", "threat": 2, "cost": 3},
+    "zsu_23_4": {"faction": "ussr", "role": "air_defense", "threat": 7, "cost": 7},
+    "ural_truck": {"faction": "ussr", "role": "transport", "threat": 0, "cost": 1},
+    "ural_ammo": {"faction": "ussr", "role": "ammo_resupply", "threat": 0, "cost": 2},
+    "ural_fuel": {"faction": "ussr", "role": "fuel_resupply", "threat": 0, "cost": 2},
+    "ural_medical": {"faction": "ussr", "role": "casevac", "threat": 0, "cost": 2},
+    "mi8": {"faction": "ussr", "role": "air_transport", "threat": 4, "cost": 8},
+    "mi24": {"faction": "ussr", "role": "cas", "threat": 9, "cost": 12},
+    "m998_humvee": {"faction": "us", "role": "transport", "threat": 1, "cost": 1},
+    "m998_humvee_mg": {"faction": "us", "role": "fire_support", "threat": 3, "cost": 2},
+    "m151_jeep": {"faction": "us", "role": "recon", "threat": 1, "cost": 1},
+    "m35_truck": {"faction": "us", "role": "transport", "threat": 0, "cost": 1},
+    "m113": {"faction": "us", "role": "mechanized_transport", "threat": 4, "cost": 4},
+    "m60a3": {"faction": "us", "role": "armor", "threat": 9, "cost": 10},
+    "uh1h": {"faction": "us", "role": "multi_role_air", "threat": 5, "cost": 8},
+    "ah1": {"faction": "us", "role": "cas", "threat": 9, "cost": 12},
+}
+
+
+# ═══════════════════════════════════════════════════════════
+# Behavior Configuration
+# ═══════════════════════════════════════════════════════════
+
+_behavior_config = {
+    "aggression": 0.5,
+    "force_ratio": 1.0,
+    "escalation_speed": 0.5,
+    "narrative_intensity": 0.5,
+    "reinforcement_rate": 0.5,
+    "flanking_tendency": 0.5,
+    "retreat_threshold": 0.3,
+    "night_ops_enabled": True,
+    "vehicle_usage": 0.5,
+    "commander_personality": "adaptive",
+}
+
+
+# ═══════════════════════════════════════════════════════════
+# Metrics Bucket
+# ═══════════════════════════════════════════════════════════
+
+class MetricsBucket:
+    def __init__(self):
+        self._response_times = []
+        self._max_samples = 100
+
+    def record_response(self, ms: float):
+        self._response_times.append(ms)
+        if len(self._response_times) > self._max_samples:
+            self._response_times = self._response_times[-self._max_samples:]
+
+    def summary(self) -> dict:
+        if not self._response_times:
+            return {"avg_ms": 0, "p95_ms": 0, "max_ms": 0, "count": 0}
+        sorted_t = sorted(self._response_times)
+        return {
+            "avg_ms": round(sum(sorted_t) / len(sorted_t), 1),
+            "p95_ms": round(sorted_t[int(len(sorted_t) * 0.95)] if len(sorted_t) >= 20 else max(sorted_t), 1),
+            "max_ms": round(max(sorted_t), 1),
+            "count": len(sorted_t),
+        }
+
+
+_metrics = MetricsBucket()
 
 
 class _LLMRateLimiter:
@@ -213,10 +328,20 @@ async def _invoke_llm_with_retry(llm, messages, *, caller_label: str = "llm"):
 
 class GameCommand(BaseModel):
     command_type: str = Field(
-        description="move, attack, defend, patrol, set_ambush, seek_and_destroy, "
-        "retreat, spawn_infantry, spawn_vehicle, spawn_reinforcements, set_weather, "
-        "set_time, set_wind, thunder_near, explosion, smoke, flare, cleanup_area, "
-        "cleanup_dead, despawn_unit, radio_message, objective_create, objective_complete"
+        description="move, attack, defend, patrol, set_ambush, seek_and_destroy, retreat, "
+        "suppress, overwatch, silent_move, garrison, establish_op, fighting_withdrawal, "
+        "flank_left, flank_right, breach, patrol_cloverleaf, patrol_zigzag, "
+        "bounding_overwatch, coordinated_operation, "
+        "hull_down, overwatch_position, dismount_assault, cas_run, troop_insert, convoy_form, "
+        "spawn_infantry, spawn_vehicle, spawn_reinforcements, "
+        "set_weather, set_time, set_wind, set_weather_progression, set_tactical_lighting, "
+        "environment_mood, artillery_barrage, building_fire, set_ambient_intensity, "
+        "distant_combat_ambience, thunder_near, explosion, smoke, flare, "
+        "radio_message, radio_comms, intel_feed, faction_comms, player_acknowledgment, "
+        "objective_create, objective_complete, objective_fail, pacing_directive, "
+        "cleanup_area, cleanup_dead, despawn_unit, "
+        "mortar_strike, air_support, supply_drop, establish_checkpoint, "
+        "lay_mines, set_roadblock, set_alert_level, spawn_marker"
     )
     unit_id: str = Field(default="new")
     target_position: str = Field(default="0,0,0")
@@ -1519,6 +1644,70 @@ Respond with ONLY this JSON, no markdown:
 
 POSITION FORMAT: "x,y,z" — y=0 (game snaps to terrain). Use unit positions from SITREP."""
 
+ADVANCED_COMMANDS_PROMPT = """
+
+=== ADVANCED TACTICAL COMMANDS ===
+- suppress: Sustained fire at position to pin enemy (params: duration, intensity)
+- overwatch: Hold position, engage targets in sector
+- silent_move: Move with hold-fire, walking speed (stealth approach)
+- garrison: Occupy and defend a building
+- establish_op: Set up observation post (early warning)
+- fighting_withdrawal: Phased retreat through phase lines (params: phase_lines=x1,z1;x2,z2;x3,z3)
+- flank_left / flank_right: Maneuver to 90-degree offset then attack
+- breach: Forceful building entry with smoke screen
+- patrol_cloverleaf: 4-lobe area recon patrol
+- patrol_zigzag: Route recon with alternating flanks
+- bounding_overwatch: Two squads alternate move/cover (params: partner=squad_X)
+
+=== VEHICLE TACTICAL COMMANDS ===
+- hull_down: Position vehicle behind terrain crest (turret only exposed)
+- overwatch_position: Vehicle covers another unit's movement
+- dismount_assault: Infantry exits APC/IFV and assaults while vehicle provides overwatch
+- cas_run: Close air support attack run (params: aircraft, pattern, approach bearing)
+- troop_insert: Helicopter troop insertion (params: aircraft, troops, count, lz_type)
+- convoy_form: Form vehicle convoy (params: formation, template, destination)
+
+=== ENVIRONMENT COMMANDS ===
+- set_weather_progression: Gradual weather transition (params: target, minutes, then_clear)
+- set_tactical_lighting: Preset lighting (sun_glare_east/west, golden_hour, dawn_assault, pitch_black, moonlit_night)
+- environment_mood: Composite mood (dread, fury, calm_before, aftermath, hope, isolation)
+- artillery_barrage: Sequential explosions (params: radius, rounds, duration, caliber)
+- building_fire: Persistent fire effect (params: intensity, duration_minutes)
+- set_ambient_intensity: Battlefield ambience level 0-3
+- distant_combat_ambience: Sustained distant firefight (params: type, duration, intensity)
+
+=== NARRATIVE COMMANDS ===
+- radio_comms: Structured military radio (params: channel, sender_callsign, recipient_callsign, message_type, message)
+- intel_feed: Intelligence report (params: classification, reliability, content, grid_reference)
+- faction_comms: Intercepted enemy transmissions
+- player_acknowledgment: Recognize player actions via radio
+
+=== TACTICAL DOCTRINE ===
+MULTI-SQUAD COORDINATION:
+- Always designate a support-by-fire element before ordering flanking maneuvers
+- Keep 1 uncommitted squad as reserve (200-400m behind main effort)
+- Use suppress + flank_left/right as a paired maneuver
+- Post rear security 200-400m behind advancing units
+
+ARMOR DOCTRINE:
+- NEVER deploy armor without infantry support within 200m
+- Hull-down is the default position for tanks/IFVs
+- T-72 engages at 1500-2000m, BMP-1 gun at 800m, ATGM at 3000m
+
+NIGHT OPERATIONS (when is_night=true):
+- Reduce engagement ranges to 150m max
+- Use flare before assaults to illuminate
+- Tighter formations, column instead of wedge
+- Favor ambushes over movement
+
+PACING RULES:
+- Maintain 3-8 minutes of quiet between major contacts
+- Build tension with intel_feed before spawning threats
+- Use environment_mood to match weather to narrative beat
+- Never sustain peak crisis intensity for more than 3 minutes
+"""
+
+SYSTEM_PROMPT += ADVANCED_COMMANDS_PROMPT
 
 _SYSTEM_PROMPT_RAW = SYSTEM_PROMPT.replace("{{{{", "{").replace("}}}}", "}")
 
@@ -1879,6 +2068,7 @@ async def _call_llm_inner(
         history.add_message(AIMessage(content=json.dumps(result, default=str)))
 
         validated = _validate_command_batch(result)
+        validated = _prioritize_commands(validated)
         if game_state:
             battle_plan.update_from_commands(validated, game_state)
 
@@ -2115,6 +2305,37 @@ def _validate_command_batch(data: dict) -> dict:
     return data
 
 
+# ═══════════════════════════════════════════════════════════
+# Command Prioritization
+# ═══════════════════════════════════════════════════════════
+
+_COMMAND_PRIORITY = {
+    "retreat": 0, "fighting_withdrawal": 0,
+    "attack": 1, "defend": 1, "suppress": 1, "seek_and_destroy": 1, "overwatch": 1,
+    "move": 2, "patrol": 2, "flank_left": 2, "flank_right": 2, "silent_move": 2,
+    "bounding_overwatch": 2, "garrison": 2, "breach": 2,
+    "spawn_infantry": 3, "spawn_vehicle": 3, "spawn_reinforcements": 3,
+    "convoy_form": 3, "troop_insert": 3, "establish_checkpoint": 3,
+    "set_weather": 4, "set_time": 4, "set_wind": 4, "smoke": 4, "flare": 4,
+    "explosion": 4, "thunder_near": 4, "artillery_barrage": 4, "building_fire": 4,
+    "set_weather_progression": 4, "set_tactical_lighting": 4, "environment_mood": 4,
+    "radio_message": 5, "radio_comms": 5, "intel_feed": 5, "faction_comms": 5,
+    "objective_create": 5, "objective_complete": 5, "objective_fail": 5,
+    "cleanup_area": 5, "cleanup_dead": 5, "despawn_unit": 5,
+    "pacing_directive": 6, "set_alert_level": 6, "set_ambient_intensity": 6,
+}
+
+
+def _prioritize_commands(batch: dict) -> dict:
+    """Reorder commands by tactical priority (lower number = higher priority)."""
+    commands = batch.get("commands", [])
+    if not commands or len(commands) <= 1:
+        return batch
+    commands.sort(key=lambda c: _COMMAND_PRIORITY.get(c.get("command_type", ""), 5))
+    batch["commands"] = commands
+    return batch
+
+
 def _build_compact_sitrep(game_state: dict) -> str:
     """Build a token-efficient situation report from game_state.
 
@@ -2326,7 +2547,14 @@ def parse_llm_response(text: str) -> dict:
     text = _strip_markdown_fences(text)
     text_fixed = _fix_common_json_issues(text)
     try:
-        return _validate_command_batch(json.loads(text_fixed))
+        parsed = json.loads(text_fixed)
+        # Handle bare arrays: [{"command_type": ...}, ...]
+        if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+            parsed = {"commands": parsed}
+        if isinstance(parsed, dict):
+            result = _validate_command_batch(parsed)
+            if result.get("commands"):
+                return result
     except json.JSONDecodeError:
         pass
 
@@ -2446,6 +2674,10 @@ async def game_master(request: Request):
 
     tactical_intel = _tactical_analyzer.analyze(game_state)
 
+    # Record SITREP to replay log
+    session_id_for_replay = game_state.get("mission_id", _active_session)
+    _replay.record("sitrep", game_state, session_id=session_id_for_replay)
+
     # Evaluate tactic outcomes from previous orders (Priority 3)
     session_id = game_state.get("mission_id", _active_session)
     battle_plan = _get_battle_plan(session_id)
@@ -2476,6 +2708,10 @@ async def game_master(request: Request):
                         commands["weather_command"] = m["weather_command"]
                     if m.get("time_override", -1) >= 0:
                         commands["time_override"] = m["time_override"]
+
+        # Record commands to replay log and metrics
+        _replay.record("commands", commands, session_id=session_id)
+        _metrics.record_response(_llm_response_time_ms)
 
         cmd_count = len(commands.get("commands", []))
         bp = _get_battle_plan(session_id)
@@ -2753,6 +2989,33 @@ async def get_battle_plan_endpoint():
         "lessons_learned": bp.lessons_learned,
         "briefing": bp.to_briefing(),
     }
+
+
+@app.get("/api/replays")
+async def list_replays():
+    _REPLAY_DIR.mkdir(parents=True, exist_ok=True)
+    files = sorted(_REPLAY_DIR.glob("*.jsonl.gz"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return {"replays": [{"filename": f.name, "size_bytes": f.stat().st_size, "modified": f.stat().st_mtime} for f in files[:50]]}
+
+
+@app.get("/api/behavior-config")
+async def get_behavior_config():
+    return _behavior_config
+
+
+@app.post("/api/behavior-config")
+async def set_behavior_config(request: Request):
+    body = await request.json()
+    for k, v in body.items():
+        if k in _behavior_config:
+            _behavior_config[k] = v
+    log.info("Behavior config updated: %s", {k: v for k, v in body.items() if k in _behavior_config})
+    return {"status": "ok", "config": _behavior_config}
+
+
+@app.get("/api/metrics")
+async def get_metrics():
+    return {"latency": _metrics.summary(), "behavior_config": _behavior_config}
 
 
 if __name__ == "__main__":

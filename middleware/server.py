@@ -9,6 +9,7 @@ Supports three LLM providers:
 Run:  uvicorn server:app --host 0.0.0.0 --port 8000
 """
 
+import asyncio
 import json
 import time
 import logging
@@ -74,6 +75,9 @@ stats = {
     "start_time": time.time(),
 }
 
+# ─── Async lock for shared state ───
+_state_lock = asyncio.Lock()
+
 # ─── LLM Client (lazy init) ───
 _llm_client = None
 
@@ -82,27 +86,27 @@ def get_llm_client():
     global _llm_client
     if _llm_client is None:
         if LLM_PROVIDER == "anthropic":
-            from anthropic import Anthropic
-            _llm_client = Anthropic()
-            log.info("Anthropic client initialized (model: %s)", MODEL_NAME)
+            from anthropic import AsyncAnthropic
+            _llm_client = AsyncAnthropic()
+            log.info("Anthropic async client initialized (model: %s)", MODEL_NAME)
         elif LLM_PROVIDER == "openai":
-            from openai import OpenAI
-            _llm_client = OpenAI()
-            log.info("OpenAI client initialized (model: %s)", MODEL_NAME)
+            from openai import AsyncOpenAI
+            _llm_client = AsyncOpenAI()
+            log.info("OpenAI async client initialized (model: %s)", MODEL_NAME)
         elif LLM_PROVIDER == "glm":
-            from openai import OpenAI
+            from openai import AsyncOpenAI
             api_key = GLM_API_KEY
             if not api_key:
                 raise ValueError(
                     "GLM_API_KEY is required when LLM_PROVIDER=glm. "
                     "Get one at https://open.z.ai/"
                 )
-            _llm_client = OpenAI(
+            _llm_client = AsyncOpenAI(
                 api_key=api_key,
                 base_url=GLM_BASE_URL,
             )
             log.info(
-                "GLM client initialized (model: %s, endpoint: %s)",
+                "GLM async client initialized (model: %s, endpoint: %s)",
                 MODEL_NAME,
                 GLM_BASE_URL,
             )
@@ -200,7 +204,8 @@ POSITION FORMAT: "x,y,z" — y can be 0 (game snaps to terrain). Learn coordinat
 @app.post("/api/game-master")
 async def game_master(request: Request):
     """Receive game state SITREP, query LLM, return command batch."""
-    stats["total_requests"] += 1
+    async with _state_lock:
+        stats["total_requests"] += 1
 
     try:
         game_state = await request.json()
@@ -208,9 +213,10 @@ async def game_master(request: Request):
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
     # Store history
-    game_history.append({"timestamp": time.time(), "state": game_state})
-    if len(game_history) > MAX_HISTORY:
-        game_history.pop(0)
+    async with _state_lock:
+        game_history.append({"timestamp": time.time(), "state": game_state})
+        if len(game_history) > MAX_HISTORY:
+            game_history.pop(0)
 
     # Build context
     history_summary = json.dumps(game_history[-5:], indent=2, default=str)
@@ -230,33 +236,35 @@ Issue your orders. Respond with ONLY valid JSON, no markdown fences."""
         commands = parse_llm_response(response_text)
 
         # Merge any pending manual commands
-        if pending_manual_commands:
-            while pending_manual_commands:
-                manual = pending_manual_commands.pop(0)
-                commands["commands"].extend(manual.get("commands", []))
-                if manual.get("narrative_broadcast"):
-                    commands["narrative_broadcast"] = manual["narrative_broadcast"]
-                if manual.get("weather_command"):
-                    commands["weather_command"] = manual["weather_command"]
-                if manual.get("time_override", -1) >= 0:
-                    commands["time_override"] = manual["time_override"]
-            log.info("Merged pending manual commands into LLM response")
+        async with _state_lock:
+            if pending_manual_commands:
+                while pending_manual_commands:
+                    manual = pending_manual_commands.pop(0)
+                    commands["commands"].extend(manual.get("commands", []))
+                    if manual.get("narrative_broadcast"):
+                        commands["narrative_broadcast"] = manual["narrative_broadcast"]
+                    if manual.get("weather_command"):
+                        commands["weather_command"] = manual["weather_command"]
+                    if manual.get("time_override", -1) >= 0:
+                        commands["time_override"] = manual["time_override"]
+                log.info("Merged pending manual commands into LLM response")
 
         # Track commands
         cmd_count = len(commands.get("commands", []))
-        stats["total_commands_issued"] += cmd_count
+        async with _state_lock:
+            stats["total_commands_issued"] += cmd_count
 
-        # Log for dashboard
-        command_log.append({
-            "timestamp": time.time(),
-            "mission_time": mission_time,
-            "player_count": player_count,
-            "command_count": cmd_count,
-            "commands": commands,
-            "source": "llm",
-        })
-        if len(command_log) > MAX_COMMAND_LOG:
-            command_log.pop(0)
+            # Log for dashboard
+            command_log.append({
+                "timestamp": time.time(),
+                "mission_time": mission_time,
+                "player_count": player_count,
+                "command_count": cmd_count,
+                "commands": commands,
+                "source": "llm",
+            })
+            if len(command_log) > MAX_COMMAND_LOG:
+                command_log.pop(0)
 
         log.info(
             "SITREP processed → %d commands | Players: %d | Mission: %.0fs",
@@ -268,7 +276,8 @@ Issue your orders. Respond with ONLY valid JSON, no markdown fences."""
         return commands
 
     except Exception as e:
-        stats["total_errors"] += 1
+        async with _state_lock:
+            stats["total_errors"] += 1
         log.error("LLM call failed: %s", e)
         return empty_response()
 
@@ -310,8 +319,9 @@ async def get_stats():
 @app.post("/api/reset")
 async def reset():
     """Reset game history (for new mission)."""
-    game_history.clear()
-    command_log.clear()
+    async with _state_lock:
+        game_history.clear()
+        command_log.clear()
     log.info("Game history cleared")
     return {"status": "reset"}
 
@@ -362,7 +372,8 @@ async def manual_command(request: Request):
     cmd_count = len(commands.get("commands", []))
 
     # Store in pending queue for the game to pick up
-    pending_manual_commands.append(commands)
+    async with _state_lock:
+        pending_manual_commands.append(commands)
 
     log.info("Manual command injected: %d commands", cmd_count)
     return {"status": "queued", "command_count": cmd_count}
@@ -374,20 +385,21 @@ async def get_pending_commands():
     Return and flush any pending manual commands.
     The game polls this alongside the normal LLM loop.
     """
-    if not pending_manual_commands:
-        return empty_response()
+    async with _state_lock:
+        if not pending_manual_commands:
+            return empty_response()
 
-    # Merge all pending batches
-    merged = empty_response()
-    while pending_manual_commands:
-        batch = pending_manual_commands.pop(0)
-        merged["commands"].extend(batch.get("commands", []))
-        if batch.get("narrative_broadcast"):
-            merged["narrative_broadcast"] = batch["narrative_broadcast"]
-        if batch.get("weather_command"):
-            merged["weather_command"] = batch["weather_command"]
-        if batch.get("time_override", -1) >= 0:
-            merged["time_override"] = batch["time_override"]
+        # Merge all pending batches
+        merged = empty_response()
+        while pending_manual_commands:
+            batch = pending_manual_commands.pop(0)
+            merged["commands"].extend(batch.get("commands", []))
+            if batch.get("narrative_broadcast"):
+                merged["narrative_broadcast"] = batch["narrative_broadcast"]
+            if batch.get("weather_command"):
+                merged["weather_command"] = batch["weather_command"]
+            if batch.get("time_override", -1) >= 0:
+                merged["time_override"] = batch["time_override"]
 
     return merged
 
@@ -413,7 +425,7 @@ async def call_llm(user_message: str) -> str:
     client = get_llm_client()
 
     if LLM_PROVIDER == "anthropic":
-        response = client.messages.create(
+        response = await client.messages.create(
             model=MODEL_NAME,
             max_tokens=MAX_TOKENS,
             system=SYSTEM_PROMPT,
@@ -421,8 +433,9 @@ async def call_llm(user_message: str) -> str:
         )
         # Track tokens
         if hasattr(response, "usage"):
-            stats["total_input_tokens"] += response.usage.input_tokens
-            stats["total_output_tokens"] += response.usage.output_tokens
+            async with _state_lock:
+                stats["total_input_tokens"] += response.usage.input_tokens
+                stats["total_output_tokens"] += response.usage.output_tokens
 
         return response.content[0].text
 
@@ -450,15 +463,16 @@ async def call_llm(user_message: str) -> str:
                 os.getenv("GLM_TEMPERATURE", "0.8")
             )
 
-        response = client.chat.completions.create(**call_kwargs)
+        response = await client.chat.completions.create(**call_kwargs)
 
         if hasattr(response, "usage") and response.usage:
-            stats["total_input_tokens"] += getattr(
-                response.usage, "prompt_tokens", 0
-            )
-            stats["total_output_tokens"] += getattr(
-                response.usage, "completion_tokens", 0
-            )
+            async with _state_lock:
+                stats["total_input_tokens"] += getattr(
+                    response.usage, "prompt_tokens", 0
+                )
+                stats["total_output_tokens"] += getattr(
+                    response.usage, "completion_tokens", 0
+                )
 
         return response.choices[0].message.content
 

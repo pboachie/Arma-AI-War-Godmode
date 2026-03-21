@@ -247,7 +247,6 @@ def _build_chat_model(provider: str, model_name: str, max_tokens: int):
 
 
 _llm = None
-_chain = None
 
 
 def _get_llm():
@@ -268,24 +267,6 @@ def _get_llm():
 
     return _llm
 
-
-def _get_chain():
-    """Build the LangChain LCEL chain: prompt -> LLM -> JSON parser."""
-    global _chain
-    if _chain is not None:
-        return _chain
-
-    llm = _get_llm()
-    parser = JsonOutputParser(pydantic_object=CommandBatch)
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", SYSTEM_PROMPT),
-        MessagesPlaceholder(variable_name="chat_history", optional=True),
-        ("human", "{sitrep}"),
-    ])
-
-    _chain = prompt | llm | parser
-    return _chain
 
 
 # ═══════════════════════════════════════════════════════════

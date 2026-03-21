@@ -150,13 +150,13 @@ function CommandEntry({ cmd, index }) {
         <span style={{ color, fontWeight: 600, width: 140, flexShrink: 0 }}>{cmd.command_type}</span>
         <span style={{ color: "#667766", width: 80, flexShrink: 0 }}>{cmd.unit_id || "\u2014"}</span>
         <span style={{ color: "#556655", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {cmd.narrative || cmd.parameters || ""}
+          {cmd.narrative || (typeof cmd.parameters === "string" ? cmd.parameters : JSON.stringify(cmd.parameters)) || ""}
         </span>
       </div>
       {expanded && (
         <div style={{ marginTop: 6, fontSize: 11, color: "#556655", fontFamily: "JetBrains Mono", lineHeight: 1.5 }}>
-          {cmd.target_position && <div>Target: <span style={{ color: "#889988" }}>{cmd.target_position}</span></div>}
-          {cmd.parameters && <div>Params: <span style={{ color: "#889988" }}>{cmd.parameters}</span></div>}
+          {cmd.target_position && <div>Target: <span style={{ color: "#889988" }}>{typeof cmd.target_position === "string" ? cmd.target_position : JSON.stringify(cmd.target_position)}</span></div>}
+          {cmd.parameters && <div>Params: <span style={{ color: "#889988" }}>{typeof cmd.parameters === "string" ? cmd.parameters : JSON.stringify(cmd.parameters)}</span></div>}
           {cmd.reasoning && <div>Reasoning: <span style={{ color: "#7799aa" }}>{cmd.reasoning}</span></div>}
           {cmd.narrative && <div>Narrative: <span style={{ color: "#aaaa77" }}>"{cmd.narrative}"</span></div>}
         </div>
@@ -410,7 +410,7 @@ function Dashboard() {
         <button style={tabStyle("manual")} onClick={() => setTab("manual")}>Manual Control</button>
       </div>
 
-      <div style={{ padding: "16px 24px", maxWidth: 1100 }}>
+      <div style={{ padding: "16px 24px 40px", maxWidth: 1100 }}>
         {/* OVERVIEW TAB */}
         {tab === "overview" && (
           <>

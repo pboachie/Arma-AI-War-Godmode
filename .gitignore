@@ -21,3 +21,5 @@ Thumbs.db
 
 # Arma Reforger Server binaries
 Arma Reforger Server/
+battle_history/
+replays/

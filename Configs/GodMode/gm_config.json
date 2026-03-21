@@ -1,8 +1,27 @@
 {
-  "version": "2.0.0",
+  "version": "2.1.0",
   "middleware": {
     "url": "http://localhost:8000",
-    "health_endpoint": "/health"
+    "health_endpoint": "/health",
+    "rcon_relay": {
+      "enabled": false,
+      "address": "127.0.0.1",
+      "port": 19999,
+      "permission": "admin"
+    }
+  },
+  "server": {
+    "max_players": 124,
+    "ai_limit": -1,
+    "view_distance": 2500,
+    "network_view_distance": 2500,
+    "disable_third_person": true,
+    "battlEye": true,
+    "player_save_time_seconds": 120,
+    "slot_reservation_timeout_seconds": 60,
+    "join_queue_max_size": 12,
+    "supported_platforms": ["PLATFORM_PC", "PLATFORM_XBL"],
+    "region": "US-LA"
   },
   "game_master": {
     "update_interval_seconds": 30,
@@ -12,16 +31,26 @@
     "max_dead_bodies": 30,
     "body_cleanup_delay_seconds": 180,
     "wreck_cleanup_delay_seconds": 300,
-    "player_safe_cleanup_radius_meters": 100
+    "player_safe_cleanup_radius_meters": 100,
+    "navmesh_streaming": true,
+    "lobby_sync": true
   },
   "scaling": {
     "0_players": { "max_squads": 10, "max_vehicles": 5, "update_interval": 30 },
     "1-4_players": { "max_squads": 15, "max_vehicles": 8, "update_interval": 30 },
     "5-12_players": { "max_squads": 30, "max_vehicles": 15, "update_interval": 45 },
-    "13+_players": { "max_squads": 50, "max_vehicles": 20, "update_interval": 60 },
+    "13-32_players": { "max_squads": 50, "max_vehicles": 20, "update_interval": 60 },
+    "33-64_players": { "max_squads": 70, "max_vehicles": 30, "update_interval": 75 },
+    "65+_players": { "max_squads": 90, "max_vehicles": 40, "update_interval": 90 },
     "performance_aware": true,
     "zone_based": true,
-    "team_coordination_scaling": true
+    "team_coordination_scaling": true,
+    "ai_limit_scaling": {
+      "enabled": true,
+      "min_ai_per_player": 3,
+      "max_ai_per_player": 8,
+      "performance_headroom_pct": 20
+    }
   },
   "weather_ids": ["Clear", "Cloudy", "Overcast", "Rainy", "Storm", "Foggy"],
   "squad_types": {
@@ -318,5 +347,25 @@
     "pursuit_force": { "infantry": ["ussr_fire_team", "ussr_fire_team"], "vehicles": ["uaz469_mg", "uaz469_mg", "btr70"], "power": 0.5 }
   },
   "escalation_curves": ["standard_bell", "slow_burn", "wave_assault", "ambush_spike", "rolling_thunder"],
-  "mission_archetypes": ["patrol_ambush", "convoy_escort", "area_denial", "search_destroy", "vip_extraction", "fob_defense", "recon", "counter_attack", "meeting_engagement"]
+  "mission_archetypes": ["patrol_ambush", "convoy_escort", "area_denial", "search_destroy", "vip_extraction", "fob_defense", "recon", "counter_attack", "meeting_engagement"],
+  "von_settings": {
+    "disable_ui": false,
+    "disable_direct_speech_ui": false,
+    "cross_faction_transmit": false,
+    "proximity_range_meters": 50,
+    "radio_range_meters": 3000
+  },
+  "persistence": {
+    "auto_save_interval_minutes": 5,
+    "save_player_state": true,
+    "save_mission_state": true,
+    "save_world_state": false,
+    "max_save_slots": 10
+  },
+  "a2s_query": {
+    "enabled": true,
+    "port": 17777,
+    "expose_player_list": true,
+    "expose_mod_list": true
+  }
 }

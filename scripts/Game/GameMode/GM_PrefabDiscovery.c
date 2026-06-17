@@ -1,12 +1,65 @@
-// GM_PrefabDiscovery.c — Run once in Workbench to discover actual prefab GUIDs
-// Attach to any entity and call DiscoverAll() from the console, or
-// place a call in OnWorldPostProcess to auto-log on load.
-//
-// USAGE:
-//   1. Add this file to your mod
-//   2. Load your scenario in Workbench Play mode
-//   3. Check the console log for all discovered prefab paths
-//   4. Copy the GUIDs into GM_VehicleManager and GM_SquadManager
+// GM_PrefabDiscovery.c — Auto-discovers prefab GUIDs on world load
+// Attach GM_PrefabDiscoveryComponentClass to your GameMode entity,
+// then hit Play in Workbench. Check the Log Console for results.
+
+[EntityEditorProps(category: "GameScripted/GodMode", description: "Auto-discover prefab GUIDs on world load")]
+class GM_PrefabDiscoveryComponentClass : SCR_BaseGameModeComponentClass {}
+
+class GM_PrefabDiscoveryComponent : SCR_BaseGameModeComponent
+{
+    [Attribute("0", UIWidgets.CheckBox, desc: "Enable automatic prefab discovery when the world starts (Workbench/dev use only)")]
+    protected bool m_bAutoRunDiscovery;
+
+    protected int m_iRetryCount = 0;
+    protected static const int MAX_RETRIES = 5;
+    protected static const int RETRY_DELAY_MS = 5000;
+
+    override void OnWorldPostProcess(World world)
+    {
+        super.OnWorldPostProcess(world);
+
+        if (!m_bAutoRunDiscovery)
+            return;
+
+        // Delay discovery to give entity catalogs time to populate
+        GetGame().GetCallqueue().CallLater(RunDiscovery, 10000, false);
+    }
+
+    protected void RunDiscovery()
+    {
+        // Check if catalogs are ready before running
+        SCR_EntityCatalogManagerComponent catalogMgr =
+            SCR_EntityCatalogManagerComponent.GetInstance();
+
+        if (!catalogMgr && m_iRetryCount < MAX_RETRIES)
+        {
+            m_iRetryCount++;
+            Print("[GodMode:Dev] Catalog manager not ready, retry " + m_iRetryCount + "/" + MAX_RETRIES + "...", LogLevel.WARNING);
+            GetGame().GetCallqueue().CallLater(RunDiscovery, RETRY_DELAY_MS, false);
+            return;
+        }
+
+        // Also check if catalogs actually have entries
+        if (catalogMgr)
+        {
+            SCR_EntityCatalog groupCatalog = catalogMgr.GetEntityCatalogOfType(EEntityCatalogType.GROUP);
+            if (groupCatalog)
+            {
+                array<SCR_EntityCatalogEntry> testEntries = new array<SCR_EntityCatalogEntry>();
+                groupCatalog.GetEntityList(testEntries);
+                if (testEntries.Count() == 0 && m_iRetryCount < MAX_RETRIES)
+                {
+                    m_iRetryCount++;
+                    Print("[GodMode:Dev] Catalogs empty, retry " + m_iRetryCount + "/" + MAX_RETRIES + "...", LogLevel.WARNING);
+                    GetGame().GetCallqueue().CallLater(RunDiscovery, RETRY_DELAY_MS, false);
+                    return;
+                }
+            }
+        }
+
+        GM_PrefabDiscovery.DiscoverAll();
+    }
+}
 
 class GM_PrefabDiscovery
 {
@@ -35,8 +88,14 @@ class GM_PrefabDiscovery
             return;
         }
 
-        array<SCR_EntityCatalogEntry> entries = {};
+        array<SCR_EntityCatalogEntry> entries = new array<SCR_EntityCatalogEntry>();
         catalog.GetEntityList(entries);
+
+        if (entries.Count() == 0)
+        {
+            Print("[GodMode:Dev] Group catalog returned 0 entries. Run this helper only in Workbench with editor catalogs loaded.", LogLevel.WARNING);
+            return;
+        }
 
         Print("Found " + entries.Count() + " group prefabs:");
         Print("───────────────────────────────────────────────");
@@ -74,8 +133,14 @@ class GM_PrefabDiscovery
             return;
         }
 
-        array<SCR_EntityCatalogEntry> entries = {};
+        array<SCR_EntityCatalogEntry> entries = new array<SCR_EntityCatalogEntry>();
         catalog.GetEntityList(entries);
+
+        if (entries.Count() == 0)
+        {
+            Print("[GodMode:Dev] Vehicle catalog returned 0 entries. Run this helper only in Workbench with editor catalogs loaded.", LogLevel.WARNING);
+            return;
+        }
 
         Print("Found " + entries.Count() + " vehicle prefabs:");
         Print("───────────────────────────────────────────────");

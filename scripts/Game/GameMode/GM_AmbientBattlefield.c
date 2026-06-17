@@ -259,7 +259,9 @@ class GM_AmbientBattlefield
             impactPos[2] = impactPos[2] + Math.Cos(bearingRad) * offset;
             impactPos[1] = GetGame().GetWorld().GetSurfaceY(impactPos[0], impactPos[2]);
 
-            string size = (type == "bomb_run") ? "vehicle" : "large";
+            string size = "large";
+            if (type == "bomb_run")
+                size = "vehicle";
             float delayMs = 3000 + i * 200; // sequential impacts
             GetGame().GetCallqueue().CallLater(ArtilleryImpact, delayMs, false, impactPos, size);
         }

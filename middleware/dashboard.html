@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>God Mode — Command & Control</title>
+<title>AI War — Autonomous LLM Command</title>
 <link rel="icon" href='data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"%3E%3Crect width="64" height="64" rx="12" fill="%230a0f0a"/%3E%3Cpath d="M32 10 50 24v16L32 54 14 40V24z" fill="none" stroke="%2300ff88" stroke-width="4"/%3E%3Ccircle cx="32" cy="32" r="6" fill="%2300ff88"/%3E%3C/svg%3E'>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -748,6 +748,1054 @@ function ManualCommandPanel({ queueCommand, busy }) {
 }
 
 // ═══════════════════════════════════════════════
+// ENHANCED SERVER TAB COMPONENTS
+// ═══════════════════════════════════════════════
+
+// ── Alert Banner ──
+function AlertBanner({ serverStatus, metrics, health }) {
+  const [dismissed, setDismissed] = useState({});
+  const dismiss = useCallback((key) => {
+    setDismissed(prev => ({ ...prev, [key]: Date.now() }));
+  }, []);
+
+  const alerts = [];
+  const proc = serverStatus?.process || {};
+  const a2s = serverStatus?.a2s || {};
+  const rcon = serverStatus?.rcon || {};
+  const cpu = metrics?.cpu_percent;
+  const mem = metrics?.memory_percent;
+  const totalReqs = health?.total_requests || 0;
+  const totalErrs = health?.total_errors || 0;
+  const errorRate = totalReqs > 0 ? (totalErrs / totalReqs) * 100 : 0;
+  const isRunning = proc.running === true;
+
+  if (proc.running === false && serverStatus) alerts.push({ key: "srv-offline", severity: "red", label: "CRITICAL", message: "SERVER OFFLINE" });
+  if (proc.docker_available === false) alerts.push({ key: "docker-unavail", severity: "red", label: "CRITICAL", message: "DOCKER NOT AVAILABLE" });
+  if (typeof cpu === "number" && cpu > 90) alerts.push({ key: "cpu-crit", severity: "red", label: "CRITICAL", message: `CPU CRITICAL: ${cpu.toFixed(1)}%` });
+  else if (typeof cpu === "number" && cpu > 75) alerts.push({ key: "cpu-high", severity: "yellow", label: "WARNING", message: `CPU HIGH: ${cpu.toFixed(1)}%` });
+  if (typeof mem === "number" && mem > 90) alerts.push({ key: "mem-crit", severity: "red", label: "CRITICAL", message: `MEMORY CRITICAL: ${mem.toFixed(1)}%` });
+  else if (typeof mem === "number" && mem > 75) alerts.push({ key: "mem-high", severity: "yellow", label: "WARNING", message: `MEMORY HIGH: ${mem.toFixed(1)}%` });
+  if (totalReqs > 0 && errorRate > 10) alerts.push({ key: "err-rate", severity: "red", label: "CRITICAL", message: `ERROR RATE CRITICAL: ${errorRate.toFixed(1)}%` });
+  if (isRunning && rcon.connected === false) alerts.push({ key: "rcon-disc", severity: "yellow", label: "WARNING", message: "RCON DISCONNECTED" });
+  if (isRunning && a2s.online === false) alerts.push({ key: "a2s-off", severity: "yellow", label: "WARNING", message: "A2S QUERY OFFLINE" });
+  if (proc.last_crash) alerts.push({ key: "recent-crash", severity: "yellow", label: "WARNING", message: "RECENT CRASH DETECTED" });
+
+  alerts.sort((a, b) => (a.severity === "red" ? 0 : 1) - (b.severity === "red" ? 0 : 1));
+  const visibleAlerts = alerts.filter(a => { const d = dismissed[a.key]; return !d || (Date.now() - d) >= 60000; });
+  const palette = { red: { bg: "rgba(255,68,68,0.12)", border: "#ff4444" }, yellow: { bg: "rgba(255,170,0,0.12)", border: "#ffaa00" } };
+  const timestamp = new Date().toLocaleTimeString();
+
+  if (visibleAlerts.length === 0) {
+    return (
+      <div style={{ background: "rgba(0,255,136,0.06)", borderLeft: "3px solid #00ff88", padding: "6px 14px", fontFamily: "JetBrains Mono", fontSize: 11, color: "#00ff88", letterSpacing: 1.5, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#00ff88", boxShadow: "0 0 6px #00ff8866" }} />
+        All Systems Nominal
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
+      {visibleAlerts.map((alert) => {
+        const p = palette[alert.severity];
+        return (
+          <div key={alert.key} style={{ background: p.bg, borderLeft: `3px solid ${p.border}`, padding: "7px 12px", display: "flex", alignItems: "center", gap: 10, fontFamily: "JetBrains Mono", fontSize: 11 }}>
+            <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: p.border, boxShadow: `0 0 6px ${p.border}66`, flexShrink: 0 }} />
+            <span style={{ color: p.border, fontWeight: 700, letterSpacing: 1.5, fontSize: 10, textTransform: "uppercase", flexShrink: 0, fontFamily: "Rajdhani" }}>{alert.label}</span>
+            <span style={{ color: "#ccddcc", letterSpacing: 0.5, flex: 1 }}>{alert.message}</span>
+            <span style={{ color: "#556655", fontSize: 10, flexShrink: 0 }}>{timestamp}</span>
+            <button onClick={() => dismiss(alert.key)} title="Dismiss for 60s" style={{ background: "none", border: `1px solid ${p.border}33`, color: p.border, cursor: "pointer", padding: "1px 6px", fontFamily: "JetBrains Mono", fontSize: 11, lineHeight: 1, opacity: 0.7, flexShrink: 0 }}>{"\u2715"}</button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── IHOP Health Dashboard ──
+function IHOPHealthDashboard({ serverStatus, metrics, health }) {
+  const tiles = React.useMemo(() => {
+    const s = serverStatus || {};
+    const proc = s.process || {};
+    const a2s = s.a2s || {};
+    const rcon = s.rcon || {};
+    const m = metrics || {};
+    const h = health || {};
+    const errorRate = h.total_requests > 0 ? (h.total_errors / h.total_requests) * 100 : 0;
+    const fmtUp = (sec) => { if (!sec && sec !== 0) return "\u2014"; const hrs = Math.floor(sec / 3600); const mins = Math.floor((sec % 3600) / 60); return hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`; };
+    return [
+      { name: "GAME SERVER", level: proc.running ? "green" : "red", metric: proc.running ? `UP ${fmtUp(proc.uptime_seconds)}` : "DOWN" },
+      { name: "RCON", level: rcon.connected ? "green" : "red", metric: rcon.connected ? "CONNECTED" : "DISCONNECTED" },
+      { name: "A2S QUERY", level: a2s.online ? "green" : "red", metric: a2s.online ? `${a2s.player_count ?? 0}/${a2s.max_players ?? 0} players` : "OFFLINE" },
+      { name: "CPU", level: (m.cpu_percent ?? 0) > 80 ? "red" : (m.cpu_percent ?? 0) > 60 ? "yellow" : "green", metric: `${(m.cpu_percent ?? 0).toFixed(1)}%` },
+      { name: "MEMORY", level: (m.memory_percent ?? 0) > 90 ? "red" : (m.memory_percent ?? 0) > 70 ? "yellow" : "green", metric: `${(m.memory_used_mb ?? 0).toFixed(0)} / ${(m.memory_limit_mb ?? 0).toFixed(0)} MB` },
+      { name: "API HEALTH", level: errorRate > 10 ? "red" : errorRate > 5 ? "yellow" : "green", metric: h.total_requests > 0 ? `${errorRate.toFixed(1)}% err rate` : "NO TRAFFIC" },
+    ];
+  }, [serverStatus, metrics, health]);
+
+  const composite = React.useMemo(() => {
+    const hasRed = tiles.some(t => t.level === "red");
+    const hasYellow = tiles.some(t => t.level === "yellow");
+    if (hasRed) return { label: "CRITICAL", color: "#ff4444", glow: "#ff444466" };
+    if (hasYellow) return { label: "DEGRADED", color: "#ffaa00", glow: "#ffaa0066" };
+    return { label: "OPERATIONAL", color: "#00ff88", glow: "#00ff8866" };
+  }, [tiles]);
+
+  const pal = { green: { fill: "#00ff88", glow: "#00ff8855", label: "HEALTHY" }, yellow: { fill: "#ffaa00", glow: "#ffaa0055", label: "DEGRADED" }, red: { fill: "#ff4444", glow: "#ff444455", label: "CRITICAL" } };
+
+  return (
+    <div style={{ background: "#0d1a0d", padding: "20px 24px 24px", fontFamily: "JetBrains Mono" }}>
+      <div style={{ fontSize: 11, letterSpacing: 2, color: "#00ff88", textTransform: "uppercase", borderBottom: "1px solid rgba(0,255,136,0.15)", paddingBottom: 6, marginBottom: 16 }}>{"\u25A0"} SYSTEM HEALTH</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+        {tiles.map((tile) => {
+          const tone = pal[tile.level];
+          return (
+            <div key={tile.name} style={{ background: "rgba(0,255,136,0.025)", border: `1px solid ${tone.fill}22`, padding: "20px 18px", display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+              <div style={{ fontSize: 10, letterSpacing: 2, color: "#667766", textTransform: "uppercase", fontWeight: 500 }}>{tile.name}</div>
+              <div style={{ width: 28, height: 28, borderRadius: "50%", background: tone.fill, boxShadow: `0 0 12px ${tone.glow}, 0 0 24px ${tone.glow}`, animation: tile.level !== "green" ? "pulse 1.8s ease-in-out infinite" : "none", margin: "4px 0" }} />
+              <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: 1.5, color: tone.fill }}>{tone.label}</div>
+              <div style={{ fontSize: 11, color: "#556655", textAlign: "center", lineHeight: 1.3 }}>{tile.metric}</div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ marginTop: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+          <span style={{ fontSize: 10, letterSpacing: 2, color: "#667766", textTransform: "uppercase" }}>OVERALL STATUS</span>
+          <span style={{ fontSize: 14, fontWeight: 700, letterSpacing: 2, color: composite.color, fontFamily: "Rajdhani", textTransform: "uppercase" }}>{composite.label}</span>
+        </div>
+        <div style={{ width: "100%", height: 6, background: "rgba(0,255,136,0.06)", borderRadius: 3, overflow: "hidden" }}>
+          <div style={{ width: "100%", height: "100%", background: composite.color, borderRadius: 3, boxShadow: `0 0 10px ${composite.glow}` }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Resource Gauges (SVG arcs) ──
+function ResourceGauges({ metrics }) {
+  const getColor = (pct) => pct >= 80 ? "#ff4444" : pct >= 60 ? "#ffaa00" : "#00ff88";
+  const ArcGauge = ({ percent, label, subtitle }) => {
+    const clamped = Math.min(100, Math.max(0, percent || 0));
+    const color = getColor(clamped);
+    const r = 50, cx = 60, cy = 60;
+    const circ = 2 * Math.PI * r;
+    const arcLen = circ * (270 / 360);
+    const offset = arcLen - (arcLen * clamped) / 100;
+    const s = (135 * Math.PI) / 180, e = (405 * Math.PI) / 180;
+    const path = `M ${cx + r * Math.cos(s)} ${cy + r * Math.sin(s)} A ${r} ${r} 0 1 1 ${cx + r * Math.cos(e)} ${cy + r * Math.sin(e)}`;
+    return (
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: "1 1 0", minWidth: 110 }}>
+        <svg viewBox="0 0 120 120" style={{ width: "100%", maxWidth: 140 }}>
+          <path d={path} fill="none" stroke="rgba(0,255,136,0.08)" strokeWidth="8" strokeLinecap="round" />
+          <path d={path} fill="none" stroke={color} strokeWidth="8" strokeLinecap="round" strokeDasharray={arcLen} strokeDashoffset={offset} style={{ transition: "stroke-dashoffset 0.8s cubic-bezier(0.4,0,0.2,1), stroke 0.5s ease" }} />
+          <text x="60" y="58" textAnchor="middle" dominantBaseline="central" style={{ fontFamily: "Rajdhani", fontWeight: 700, fontSize: "28px", fill: color }}>{Math.round(clamped)}%</text>
+          <text x="60" y="82" textAnchor="middle" dominantBaseline="central" style={{ fontFamily: "JetBrains Mono", fontSize: "8px", fill: "rgba(0,255,136,0.6)", textTransform: "uppercase", letterSpacing: "1.5px" }}>{label}</text>
+          <text x="60" y="96" textAnchor="middle" dominantBaseline="central" style={{ fontFamily: "JetBrains Mono", fontSize: "6.5px", fill: "rgba(0,255,136,0.35)" }}>{subtitle}</text>
+        </svg>
+      </div>
+    );
+  };
+  if (!metrics) return (
+    <div style={panelStyle}>
+      <div style={{ fontSize: 11, color: "#00ff88", letterSpacing: 2, textTransform: "uppercase", fontFamily: "JetBrains Mono", marginBottom: 14, borderBottom: "1px solid rgba(0,255,136,0.15)", paddingBottom: 6 }}>{"\u25A0"} Resource Utilization</div>
+      <div style={{ fontSize: 12, color: "#445544", fontFamily: "JetBrains Mono", textAlign: "center", padding: "32px 0" }}>Awaiting metrics data...</div>
+    </div>
+  );
+  const cpu_percent = metrics.cpu_percent ?? 0, memory_percent = metrics.memory_percent ?? 0, memory_used_mb = metrics.memory_used_mb ?? 0, memory_limit_mb = metrics.memory_limit_mb ?? 0, network_rx_mb = metrics.network_rx_mb ?? 0, network_tx_mb = metrics.network_tx_mb ?? 0, disk_read_mb = metrics.disk_read_mb ?? 0, disk_write_mb = metrics.disk_write_mb ?? 0, pids = metrics.pids ?? 0;
+  return (
+    <div style={panelStyle}>
+      <div style={{ fontSize: 11, color: "#00ff88", letterSpacing: 2, textTransform: "uppercase", fontFamily: "JetBrains Mono", marginBottom: 14, borderBottom: "1px solid rgba(0,255,136,0.15)", paddingBottom: 6 }}>{"\u25A0"} Resource Utilization</div>
+      <div style={{ display: "flex", justifyContent: "center", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+        <ArcGauge percent={cpu_percent} label="CPU" subtitle={`${cpu_percent.toFixed(1)}% LOAD`} />
+        <ArcGauge percent={memory_percent} label="MEMORY" subtitle={`${Math.round(memory_used_mb)} / ${Math.round(memory_limit_mb)} MB`} />
+        <ArcGauge percent={Math.min(100, disk_read_mb + disk_write_mb)} label="DISK I/O" subtitle={`R:${disk_read_mb.toFixed(1)} W:${disk_write_mb.toFixed(1)} MB`} />
+      </div>
+      <div style={{ display: "flex", justifyContent: "center", gap: 24, marginTop: 14, paddingTop: 10, borderTop: "1px solid rgba(0,255,136,0.06)", fontFamily: "JetBrains Mono", fontSize: 10, color: "rgba(0,255,136,0.4)", flexWrap: "wrap" }}>
+        <span>NET RX: <span style={{ color: "#00ff88" }}>{network_rx_mb.toFixed(2)} MB</span></span>
+        <span>NET TX: <span style={{ color: "#00ff88" }}>{network_tx_mb.toFixed(2)} MB</span></span>
+        <span>PIDs: <span style={{ color: "#00ff88" }}>{pids}</span></span>
+      </div>
+    </div>
+  );
+}
+
+// ── Uptime Timeline ──
+function UptimeTimeline({ serverStatus }) {
+  const MAX_PTS = 60;
+  const historyRef = useRef([]);
+  const [, forceUpdate] = useState(0);
+  useEffect(() => {
+    if (!serverStatus) return;
+    const isUp = serverStatus.process?.running === true;
+    const entry = { timestamp: Date.now(), up: isUp };
+    const h = historyRef.current;
+    const last = h[h.length - 1];
+    if (last && Math.abs(last.timestamp - entry.timestamp) < 1000) h[h.length - 1] = entry;
+    else h.push(entry);
+    if (h.length > MAX_PTS) historyRef.current = h.slice(h.length - MAX_PTS);
+    forceUpdate(n => n + 1);
+  }, [serverStatus]);
+
+  const history = historyRef.current;
+  const segments = React.useMemo(() => {
+    const r = [];
+    for (let i = 0; i < MAX_PTS - history.length; i++) r.push({ type: "none" });
+    for (const h of history) r.push({ type: h.up ? "up" : "down", timestamp: h.timestamp });
+    return r;
+  }, [history.length, serverStatus]);
+
+  const uptimePct = history.length > 0 ? Math.round((history.filter(h => h.up).length / history.length) * 100) : null;
+  const streakInfo = React.useMemo(() => {
+    if (history.length === 0) return null;
+    const cur = history[history.length - 1].up;
+    let start = history.length - 1;
+    while (start > 0 && history[start - 1].up === cur) start--;
+    return { up: cur, duration: Date.now() - history[start].timestamp, startTime: history[start].timestamp };
+  }, [history.length, serverStatus]);
+  const fmtDur = (ms) => { const s = Math.floor(ms / 1000); const h = Math.floor(s / 3600); const m = Math.floor((s % 3600) / 60); return h > 0 ? `${h}h ${m}m` : `${m}m ${s % 60}s`; };
+  const fmtTs = (t) => new Date(t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  const pctColor = (p) => p >= 90 ? "#00ff88" : p >= 70 ? "#ffcc00" : "#ff4444";
+  const segColor = (t) => t === "up" ? "#00ff88" : t === "down" ? "#ff4444" : "#334433";
+  const lastCrash = serverStatus?.process?.last_crash;
+
+  return (
+    <div style={panelStyle}>
+      <div style={{ fontSize: 11, letterSpacing: 2, color: "#00ff88", fontFamily: "JetBrains Mono", textTransform: "uppercase", marginBottom: 12 }}>{"\u25A0"} Uptime History</div>
+      <div style={{ display: "flex", gap: 2, height: 24, marginBottom: 6 }}>
+        {segments.map((seg, i) => <div key={i} title={seg.type === "none" ? "No data" : seg.type === "up" ? "Online" : "Offline"} style={{ width: 4, height: 24, borderRadius: 1, background: segColor(seg.type), opacity: seg.type === "none" ? 0.4 : 0.9, flexShrink: 0 }} />)}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "rgba(0,255,136,0.3)", fontFamily: "JetBrains Mono", marginBottom: 16 }}>
+        <span>Last 5 minutes</span><span>Now</span>
+      </div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 16, flexWrap: "wrap" }}>
+        {uptimePct !== null ? (
+          <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+            <span style={{ fontFamily: "Rajdhani", fontSize: 28, fontWeight: 700, color: pctColor(uptimePct), lineHeight: 1 }}>{uptimePct}%</span>
+            <span style={{ fontSize: 10, color: "rgba(0,255,136,0.35)", textTransform: "uppercase", letterSpacing: 1 }}>uptime</span>
+          </div>
+        ) : <span style={{ fontFamily: "Rajdhani", fontSize: 28, fontWeight: 700, color: "#334433" }}>{"\u2014"}%</span>}
+        {streakInfo && <div style={{ fontSize: 11, color: streakInfo.up ? "rgba(0,255,136,0.7)" : "rgba(255,68,68,0.8)", borderLeft: "1px solid rgba(0,255,136,0.1)", paddingLeft: 14 }}>{streakInfo.up ? `Up for ${fmtDur(streakInfo.duration)}` : `Down since ${fmtTs(streakInfo.startTime)}`}</div>}
+      </div>
+      {lastCrash && <div style={{ marginTop: 12, fontSize: 10, color: "rgba(255,68,68,0.5)", fontFamily: "JetBrains Mono" }}>Last incident: {typeof lastCrash === "number" ? fmtTs(lastCrash) : lastCrash}</div>}
+    </div>
+  );
+}
+
+// ── Server Log Stream (SSE + polling fallback) ──
+function ServerLogStream() {
+  const MAX_LINES = 500;
+  const [lines, setLines] = useState([]);
+  const [connectionStatus, setConnectionStatus] = useState("disconnected");
+  const [paused, setPaused] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const [filter, setFilter] = useState("");
+  const logEndRef = useRef(null);
+  const containerRef = useRef(null);
+  const eventSourceRef = useRef(null);
+  const pollTimerRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
+  const reconnectAttemptRef = useRef(0);
+  const pausedRef = useRef(false);
+  const linesRef = useRef([]);
+  const lineIdRef = useRef(0);
+  const usingPollingRef = useRef(false);
+  pausedRef.current = paused;
+  linesRef.current = lines;
+
+  const parseLevel = (line) => { const u = (line || "").toUpperCase(); if (u.includes("ERROR") || u.includes("FATAL")) return "error"; if (u.includes("WARN")) return "warn"; return "info"; };
+  const appendLines = useCallback((newEntries) => { if (pausedRef.current) return; setLines(prev => { const c = [...prev, ...newEntries]; return c.length > MAX_LINES ? c.slice(c.length - MAX_LINES) : c; }); }, []);
+
+  const startPolling = useCallback(() => {
+    if (usingPollingRef.current) return;
+    usingPollingRef.current = true;
+    setConnectionStatus("connected");
+    const poll = async () => {
+      if (pausedRef.current) return;
+      try {
+        const resp = await fetch(`${API_BASE}/api/server/log?lines=100`);
+        if (!resp.ok) throw new Error();
+        const data = await resp.json();
+        const existing = new Set(linesRef.current.map(l => l.message));
+        const newE = (data.lines || []).filter(l => !existing.has(l)).map(l => ({ id: ++lineIdRef.current, message: l, timestamp: new Date().toISOString(), level: parseLevel(l) }));
+        if (newE.length > 0) appendLines(newE);
+        setConnectionStatus("connected");
+      } catch { setConnectionStatus("reconnecting"); }
+    };
+    poll();
+    pollTimerRef.current = setInterval(poll, 3000);
+  }, [appendLines]);
+
+  const connectSSE = useCallback(() => {
+    if (eventSourceRef.current) eventSourceRef.current.close();
+    clearInterval(pollTimerRef.current);
+    usingPollingRef.current = false;
+    setConnectionStatus("reconnecting");
+    try {
+      const es = new EventSource(`${API_BASE}/api/server/log/stream`);
+      eventSourceRef.current = es;
+      es.onopen = () => { setConnectionStatus("connected"); reconnectAttemptRef.current = 0; };
+      es.onmessage = (event) => { try { const d = JSON.parse(event.data); appendLines([{ id: ++lineIdRef.current, message: d.line || "", timestamp: d.timestamp || new Date().toISOString(), level: (d.level || "info").toLowerCase() }]); } catch {} };
+      es.onerror = () => { es.close(); eventSourceRef.current = null; setConnectionStatus("reconnecting"); const att = reconnectAttemptRef.current++; if (att >= 3) { startPolling(); return; } reconnectTimerRef.current = setTimeout(connectSSE, Math.min(1000 * Math.pow(2, att), 30000)); };
+    } catch { startPolling(); }
+  }, [appendLines, startPolling]);
+
+  useEffect(() => { connectSSE(); return () => { if (eventSourceRef.current) eventSourceRef.current.close(); clearInterval(pollTimerRef.current); clearTimeout(reconnectTimerRef.current); }; }, [connectSSE]);
+  useEffect(() => { if (autoScroll && logEndRef.current) logEndRef.current.scrollIntoView({ behavior: "smooth" }); }, [lines, autoScroll]);
+  const handleScroll = useCallback(() => { if (!containerRef.current) return; const el = containerRef.current; setAutoScroll(el.scrollHeight - el.scrollTop - el.clientHeight < 40); }, []);
+
+  const filterLower = filter.toLowerCase();
+  const visible = filter ? lines.filter(l => l.message.toLowerCase().includes(filterLower)) : lines;
+  const lvlColor = (l) => l === "error" ? "#ff4444" : l === "warn" ? "#ffaa00" : "#00ff88";
+  const dotColor = { connected: "#00ff88", reconnecting: "#ffaa00", disconnected: "#ff4444" }[connectionStatus] || "#ff4444";
+  const fmtTs2 = (s) => { try { return new Date(s).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" }); } catch { return "--:--:--"; } };
+  const btnBase = (color, active) => ({ background: active ? `${color}28` : `${color}12`, border: `1px solid ${color}${active ? "66" : "33"}`, color, padding: "5px 14px", fontFamily: "JetBrains Mono", fontSize: 10, cursor: "pointer", letterSpacing: 1, textTransform: "uppercase", borderRadius: 3, flexShrink: 0 });
+
+  return (
+    <div style={panelStyle}>
+      <div style={{ fontSize: 11, letterSpacing: 2, color: "#00ff88", fontFamily: "JetBrains Mono", textTransform: "uppercase", borderBottom: "1px solid rgba(0,255,136,0.15)", paddingBottom: 6, marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span>{"\u25A0"} Live Server Logs</span>
+        <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 10 }}>
+          <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: dotColor, boxShadow: `0 0 6px ${dotColor}66`, animation: connectionStatus === "reconnecting" ? "pulse 1.5s ease-in-out infinite" : "none" }} />
+          <span style={{ color: dotColor, letterSpacing: 1 }}>{connectionStatus.toUpperCase()}</span>
+          <span style={{ color: "#556655", marginLeft: 4 }}>{lines.length} lines</span>
+        </span>
+      </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <input type="text" placeholder="Filter logs..." value={filter} onChange={(e) => setFilter(e.target.value)} style={{ flex: 1, minWidth: 120, background: "rgba(0,0,0,0.3)", border: "1px solid rgba(0,255,136,0.15)", color: "#ccddcc", padding: "5px 10px", fontFamily: "JetBrains Mono", fontSize: 11, outline: "none", borderRadius: 3 }} />
+        <button onClick={() => setPaused(p => !p)} style={btnBase(paused ? "#ffaa00" : "#00ff88", true)}>{paused ? "\u25B6 Resume" : "\u23F8 Pause"}</button>
+        <button onClick={() => setAutoScroll(a => !a)} style={btnBase(autoScroll ? "#00ff88" : "#88bbff", autoScroll)}>{autoScroll ? "Auto-scroll On" : "Auto-scroll Off"}</button>
+        <button onClick={() => { setLines([]); lineIdRef.current = 0; }} style={btnBase("#ff4444", false)}>Clear</button>
+      </div>
+      <div ref={containerRef} onScroll={handleScroll} style={{ maxHeight: 360, overflowY: "auto", background: "rgba(0,0,0,0.25)", border: "1px solid rgba(0,255,136,0.06)", borderRadius: 4 }}>
+        {visible.length === 0 ? (
+          <div style={{ color: "#445544", fontSize: 12, fontFamily: "JetBrains Mono", padding: "24px 12px", textAlign: "center" }}>{filter ? "No log lines match filter" : "Waiting for log data..."}</div>
+        ) : visible.map((entry) => (
+          <div key={entry.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "3px 10px", borderBottom: "1px solid rgba(0,255,136,0.03)", fontFamily: "JetBrains Mono", fontSize: 11, lineHeight: 1.5 }}>
+            <span style={{ color: "#445544", fontSize: 9, flexShrink: 0, width: 60, paddingTop: 2 }}>{fmtTs2(entry.timestamp)}</span>
+            <span style={{ display: "inline-block", fontSize: 8, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", padding: "1px 5px", background: `${lvlColor(entry.level)}18`, color: lvlColor(entry.level), border: `1px solid ${lvlColor(entry.level)}44`, width: 42, textAlign: "center", flexShrink: 0, borderRadius: 2 }}>{entry.level === "warn" ? "WARN" : entry.level.toUpperCase()}</span>
+            <span style={{ color: lvlColor(entry.level), flex: 1, wordBreak: "break-all", whiteSpace: "pre-wrap" }}>{entry.message}</span>
+          </div>
+        ))}
+        <div ref={logEndRef} />
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 9, fontFamily: "JetBrains Mono", color: "#445544" }}>
+        <span>{filter ? `${visible.length} of ${lines.length} shown` : `${lines.length} / ${MAX_LINES} buffer`}</span>
+        <span>{usingPollingRef.current ? "MODE: POLLING" : "MODE: SSE"}{paused ? " | PAUSED" : ""}</span>
+      </div>
+    </div>
+  );
+}
+
+// ── Performance Scoreboard ──
+function PerformanceScoreboard({ serverStatus, metrics, health }) {
+  const scores = React.useMemo(() => {
+    const cpu = metrics?.cpu_percent ?? 0;
+    const mem = metrics?.memory_percent ?? 0;
+    const totalReqs = health?.total_requests ?? 0;
+    const totalErrs = health?.total_errors ?? 0;
+    const errorRate = totalReqs > 0 ? (totalErrs / totalReqs) * 100 : 0;
+    const uptimeSec = health?.uptime_seconds ?? 0;
+    return {
+      cpuScore: Math.max(0, Math.min(100, 100 - cpu)),
+      memScore: Math.max(0, Math.min(100, 100 - mem)),
+      reliabilityScore: Math.max(0, Math.min(100, 100 - errorRate * 10)),
+      uptimeScore: Math.max(0, Math.min(100, (uptimeSec / 86400) * 100)),
+    };
+  }, [metrics, health]);
+
+  const overall = (scores.cpuScore + scores.memScore + scores.reliabilityScore + scores.uptimeScore) / 4;
+  let grade, gradeColor;
+  if (overall >= 95) { grade = "A+"; gradeColor = "#00ff88"; }
+  else if (overall >= 85) { grade = "A"; gradeColor = "#00ff88"; }
+  else if (overall >= 75) { grade = "B"; gradeColor = "#88ddff"; }
+  else if (overall >= 60) { grade = "C"; gradeColor = "#ffcc66"; }
+  else if (overall >= 45) { grade = "D"; gradeColor = "#ff8844"; }
+  else { grade = "F"; gradeColor = "#ff4444"; }
+
+  const getScoreColor = (s) => s >= 90 ? "#00ff88" : s >= 75 ? "#88ddff" : s >= 60 ? "#ffcc66" : s >= 40 ? "#ff8844" : "#ff4444";
+  const bars = [{ label: "CPU SCORE", value: scores.cpuScore }, { label: "MEMORY SCORE", value: scores.memScore }, { label: "RELIABILITY", value: scores.reliabilityScore }, { label: "UPTIME", value: scores.uptimeScore }];
+  const fmtN = (n) => n != null ? Number(n).toLocaleString() : "\u2014";
+  const ping = serverStatus?.a2s?.ping ?? 0;
+
+  return (
+    <div style={panelStyle}>
+      <div style={{ fontSize: 11, letterSpacing: 2, color: "#00ff88", fontFamily: "JetBrains Mono", textTransform: "uppercase", marginBottom: 20, paddingBottom: 10, borderBottom: "1px solid rgba(0,255,136,0.06)" }}>{"\u25A0"} Performance Scoreboard</div>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginBottom: 24, padding: "16px 0" }}>
+        <div style={{ fontSize: 9, letterSpacing: 2, color: "rgba(0,255,136,0.35)", textTransform: "uppercase", marginBottom: 6 }}>Performance Grade</div>
+        <div style={{ fontFamily: "Rajdhani", fontSize: 48, fontWeight: 700, lineHeight: 1, color: gradeColor, textShadow: `0 0 20px ${gradeColor}44` }}>{grade}</div>
+        <div style={{ fontSize: 10, color: "rgba(0,255,136,0.3)", fontFamily: "JetBrains Mono", marginTop: 4 }}>{overall.toFixed(1)} / 100</div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 24 }}>
+        {bars.map(bar => {
+          const color = getScoreColor(bar.value);
+          return (
+            <div key={bar.label} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontSize: 10, letterSpacing: 0.5, color: "rgba(0,255,136,0.45)", width: 130, flexShrink: 0, textTransform: "uppercase", fontFamily: "JetBrains Mono" }}>{bar.label}</span>
+              <div style={{ flex: 1, height: 6, background: "rgba(0,255,136,0.04)", borderRadius: 3, overflow: "hidden" }}>
+                <div style={{ width: `${Math.max(0, Math.min(100, bar.value))}%`, height: "100%", background: `linear-gradient(90deg, ${color}88, ${color})`, borderRadius: 3, transition: "width 0.6s ease-out" }} />
+              </div>
+              <span style={{ fontSize: 10, fontWeight: 600, width: 36, textAlign: "right", color, fontFamily: "JetBrains Mono" }}>{Math.round(bar.value)}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, paddingTop: 16, borderTop: "1px solid rgba(0,255,136,0.06)" }}>
+        {[{ label: "REQUESTS", value: fmtN(health?.total_requests) }, { label: "COMMANDS", value: fmtN(health?.total_commands_issued) }, { label: "AVG PING", value: `${(ping * 1000).toFixed(1)}ms` }, { label: "PROCESSES", value: fmtN(metrics?.pids) }].map(s => (
+          <div key={s.label} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+            <span style={{ fontSize: 8, letterSpacing: 1, color: "rgba(0,255,136,0.3)", textTransform: "uppercase", fontFamily: "JetBrains Mono", textAlign: "center" }}>{s.label}</span>
+            <span style={{ fontFamily: "Rajdhani", fontSize: 18, fontWeight: 700, color: "#00ff88", lineHeight: 1 }}>{s.value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Player Activity Chart ──
+function PlayerActivityChart({ currentPlayerCount, maxPlayers }) {
+  const historyRef = useRef([]);
+  const lastRecordRef = useRef({ count: null, time: 0 });
+  const now = Date.now();
+  const last = lastRecordRef.current;
+  if (currentPlayerCount !== last.count || now - last.time >= 5000) {
+    historyRef.current.push({ count: currentPlayerCount, timestamp: now });
+    if (historyRef.current.length > 60) historyRef.current = historyRef.current.slice(-60);
+    lastRecordRef.current = { count: currentPlayerCount, time: now };
+  }
+  const history = historyRef.current;
+  const stats = React.useMemo(() => {
+    if (history.length === 0) return null;
+    let peak = -Infinity, min = Infinity, sum = 0, peakIdx = 0;
+    history.forEach((h, i) => { sum += h.count; if (h.count > peak) { peak = h.count; peakIdx = i; } if (h.count < min) min = h.count; });
+    return { peak, min, avg: Math.round((sum / history.length) * 10) / 10, peakIndex: peakIdx };
+  }, [history.length, currentPlayerCount]);
+  const barColor = (c) => { const r = maxPlayers > 0 ? c / maxPlayers : 0; return r >= 0.75 ? "#ff4444" : r >= 0.4 ? "#ffaa00" : "#00ff88"; };
+
+  if (!stats) return (
+    <div style={panelStyle}>
+      <div style={{ fontSize: 11, letterSpacing: 2, color: "#00ff88", fontFamily: "JetBrains Mono", textTransform: "uppercase", borderBottom: "1px solid rgba(0,255,136,0.15)", paddingBottom: 6, marginBottom: 14 }}>{"\u25A0"} Player Activity</div>
+      <div style={{ height: 120, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontFamily: "JetBrains Mono", color: "#445544", background: "rgba(0,0,0,0.2)", borderRadius: 4 }}>Collecting player data...</div>
+    </div>
+  );
+
+  return (
+    <div style={panelStyle}>
+      <div style={{ fontSize: 11, letterSpacing: 2, color: "#00ff88", fontFamily: "JetBrains Mono", textTransform: "uppercase", borderBottom: "1px solid rgba(0,255,136,0.15)", paddingBottom: 6, marginBottom: 14 }}>{"\u25A0"} Player Activity</div>
+      <div style={{ position: "relative", width: "100%", height: 120, background: "rgba(0,0,0,0.25)", borderRadius: 4, overflow: "hidden", display: "flex", alignItems: "flex-end" }}>
+        {[0.25, 0.5, 0.75].map(f => <div key={f} style={{ position: "absolute", bottom: `${f * 100}%`, left: 0, right: 0, height: 1, background: "rgba(0,255,136,0.06)", pointerEvents: "none" }} />)}
+        {history.map((p, i) => {
+          const hPct = maxPlayers > 0 ? Math.max((p.count / maxPlayers) * 100, 1) : 1;
+          const c = barColor(p.count);
+          return (
+            <div key={i} style={{ position: "relative", flex: "0 0 4px", height: `${hPct}%`, display: "flex", flexDirection: "column", alignItems: "center", transition: "height 0.3s ease" }}>
+              {i === stats.peakIndex && <div style={{ position: "absolute", top: -3, width: 6, height: 6, borderRadius: "50%", background: "#ffffff", boxShadow: `0 0 6px ${c}`, zIndex: 2 }} />}
+              <div style={{ width: "100%", height: "100%", background: c, borderRadius: "1px 1px 0 0", opacity: 0.85 }} />
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 12, gap: 12, flexWrap: "wrap" }}>
+        {[{ l: "Current", v: `${currentPlayerCount}/${maxPlayers}`, c: barColor(currentPlayerCount) }, { l: "Peak", v: stats.peak, c: "#ff4444" }, { l: "Average", v: stats.avg, c: "#ffaa00" }, { l: "Min", v: stats.min, c: "#00ff88" }].map(s => (
+          <div key={s.l}>
+            <div style={{ fontSize: 10, color: "#556655", fontFamily: "JetBrains Mono", textTransform: "uppercase", letterSpacing: 1 }}>{s.l}</div>
+            <div style={{ fontSize: 14, fontWeight: 600, fontFamily: "Rajdhani", color: s.c, marginTop: 2 }}>{s.v}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Quick Diagnostics ──
+function QuickDiagnostics({ fetchJson, serverStatus }) {
+  const [checks, setChecks] = useState([
+    { name: "API Health", status: "idle", detail: "" },
+    { name: "Server Status", status: "idle", detail: "" },
+    { name: "RCON Connection", status: "idle", detail: "" },
+    { name: "A2S Query", status: "idle", detail: "" },
+    { name: "Game State", status: "idle", detail: "" },
+    { name: "Server Logs", status: "idle", detail: "" },
+    { name: "Config Readable", status: "idle", detail: "" },
+    { name: "Docker Available", status: "idle", detail: "" },
+  ]);
+  const [running, setRunning] = useState(false);
+  const [lastRun, setLastRun] = useState(null);
+
+  const updateCheck = (idx, status, detail) => setChecks(prev => prev.map((c, i) => i === idx ? { ...c, status, detail, timestamp: new Date().toLocaleTimeString() } : c));
+
+  const runAll = useCallback(async () => {
+    setRunning(true);
+    const runners = [
+      async () => { try { await fetchJson("/health"); return { ok: true, detail: "200 OK" }; } catch (e) { return { ok: false, detail: e.message }; } },
+      async () => { try { const d = await fetchJson("/api/server/status"); return { ok: d.process?.running, detail: d.process?.running ? "Running" : "Not running" }; } catch (e) { return { ok: false, detail: e.message }; } },
+      async () => { try { const d = await fetchJson("/api/server/status"); return { ok: d.rcon?.connected, detail: d.rcon?.connected ? "Connected" : "Disconnected" }; } catch (e) { return { ok: false, detail: e.message }; } },
+      async () => { try { const d = await fetchJson("/api/server/status"); return { ok: d.a2s?.online, detail: d.a2s?.online ? "Online" : "Offline" }; } catch (e) { return { ok: false, detail: e.message }; } },
+      async () => { try { const d = await fetchJson("/api/game-state"); return { ok: !!d, detail: "OK" }; } catch (e) { return { ok: false, detail: e.message }; } },
+      async () => { try { const d = await fetchJson("/api/server/log?lines=5"); return { ok: (d.lines || []).length > 0, detail: `${(d.lines || []).length} lines` }; } catch (e) { return { ok: false, detail: e.message }; } },
+      async () => { try { const d = await fetchJson("/api/server/config"); return { ok: !d.error, detail: d.error || "Readable" }; } catch (e) { return { ok: false, detail: e.message }; } },
+      async () => { const ok = serverStatus?.process?.docker_available !== false; return { ok, detail: ok ? "Available" : "Not available" }; },
+    ];
+    for (let i = 0; i < runners.length; i++) {
+      updateCheck(i, "running", "Running...");
+      const result = await runners[i]();
+      updateCheck(i, result.ok ? "pass" : "fail", result.detail);
+    }
+    setLastRun(new Date().toLocaleTimeString());
+    setRunning(false);
+  }, [fetchJson, serverStatus]);
+
+  const passed = checks.filter(c => c.status === "pass").length;
+  const failed = checks.filter(c => c.status === "fail").length;
+  const total = checks.length;
+  const icons = { idle: { sym: "\u2014", color: "#556655" }, running: { sym: "\u25CF", color: "#ffaa00" }, pass: { sym: "\u2713", color: "#00ff88" }, fail: { sym: "\u2717", color: "#ff4444" } };
+  const progress = checks.filter(c => c.status !== "idle").length;
+
+  return (
+    <div style={panelStyle}>
+      <div style={{ fontSize: 11, letterSpacing: 2, color: "#00ff88", fontFamily: "JetBrains Mono", textTransform: "uppercase", borderBottom: "1px solid rgba(0,255,136,0.15)", paddingBottom: 6, marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span>{"\u25A0"} Diagnostics</span>
+        {lastRun && <span style={{ fontSize: 9, color: "#556655", letterSpacing: 1 }}>Last run: {lastRun}</span>}
+      </div>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 14 }}>
+        <button onClick={runAll} disabled={running} style={{ background: "rgba(0,255,136,0.12)", border: "1px solid rgba(0,255,136,0.3)", color: "#00ff88", padding: "6px 18px", fontFamily: "JetBrains Mono", fontSize: 11, cursor: running ? "wait" : "pointer", letterSpacing: 1, textTransform: "uppercase", opacity: running ? 0.6 : 1 }}>{running ? "Running..." : "\u25B8 Run All Checks"}</button>
+        {(passed > 0 || failed > 0) && <span style={{ fontSize: 11, fontFamily: "JetBrains Mono", color: failed > 0 ? "#ff4444" : "#00ff88" }}>{passed}/{total} PASSED{failed > 0 ? ` (${failed} FAILED)` : ""}</span>}
+      </div>
+      {running && <div style={{ height: 4, background: "rgba(0,255,136,0.08)", borderRadius: 2, overflow: "hidden", marginBottom: 10 }}><div style={{ width: `${(progress / total) * 100}%`, height: "100%", background: "#00ff88", borderRadius: 2, transition: "width 0.3s ease" }} /></div>}
+      <div>
+        {checks.map((check, i) => {
+          const ic = icons[check.status];
+          return (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "5px 0", borderBottom: "1px solid rgba(0,255,136,0.05)", fontFamily: "JetBrains Mono" }}>
+              <span style={{ color: ic.color, fontSize: 14, width: 20, textAlign: "center", flexShrink: 0, animation: check.status === "running" ? "pulse 1s infinite" : "none" }}>{ic.sym}</span>
+              <span style={{ fontSize: 12, color: "#ccddcc", flex: 1 }}>{check.name}</span>
+              <span style={{ fontSize: 11, color: "#667766" }}>{check.detail}</span>
+              {check.timestamp && <span style={{ fontSize: 10, color: "#445544" }}>{check.timestamp}</span>}
+              {check.status === "fail" && !running && <button onClick={async () => { updateCheck(i, "running", "Retrying..."); const runners = [() => fetchJson("/health").then(() => ({ ok: true, detail: "200 OK" })).catch(e => ({ ok: false, detail: e.message }))]; const r = await runners[0](); updateCheck(i, r.ok ? "pass" : "fail", r.detail); }} style={{ background: "none", border: "1px solid rgba(255,68,68,0.3)", color: "#ff4444", padding: "1px 8px", fontSize: 9, cursor: "pointer", fontFamily: "JetBrains Mono", flexShrink: 0 }}>retry</button>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════
+// ORIGINAL SERVER TAB COMPONENTS
+// ═══════════════════════════════════════════════
+
+const formatUptime = (seconds) => {
+  if (!seconds && seconds !== 0) return "\u2014";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+};
+
+const syntaxHighlightJson = (json) => {
+  const str = JSON.stringify(json, null, 2);
+  return str
+    .replace(/(".*?")(\s*:\s*)/g, '<span style="color:#00ff88">$1</span>$2')
+    .replace(/:\s*(".*?")/g, ': <span style="color:#88bbff">$1</span>')
+    .replace(/:\s*(\d+\.?\d*)/g, ': <span style="color:#ffcc66">$1</span>')
+    .replace(/:\s*(true|false)/g, ': <span style="color:#ff88aa">$1</span>')
+    .replace(/:\s*(null)/g, ': <span style="color:#667766">$1</span>');
+};
+
+const RCON_QUICK_ACTIONS = [
+  { label: "players", cmd: "players" },
+  { label: "#restart", cmd: "#restart" },
+  { label: "say", cmd: 'say -1 "Hello"' },
+];
+
+const MAX_RCON_HISTORY = 200;
+
+const panelStyle = {
+  background: "#0d1a0d",
+  border: "1px solid rgba(0,255,136,0.08)",
+  borderRadius: 8,
+  padding: 18,
+};
+
+function ServerStatusPanel({ serverStatus, onAction, busyAction }) {
+  const proc = serverStatus?.process || {};
+  const a2s = serverStatus?.a2s || {};
+  const rcon = serverStatus?.rcon || {};
+  const isRunning = proc.running === true;
+  const isStarting = busyAction === "server:start" || busyAction === "server:restart";
+
+  let dotColor = "#ff4444";
+  let statusLabel = "Stopped";
+  if (isStarting) {
+    dotColor = "#ffaa00";
+    statusLabel = "Starting...";
+  } else if (isRunning) {
+    dotColor = "#00ff88";
+    statusLabel = "Running";
+  }
+
+  const maxPlayers = a2s.max_players || 64;
+  const currentPlayers = a2s.player_count ?? 0;
+  const playerPct = maxPlayers > 0 ? (currentPlayers / maxPlayers) * 100 : 0;
+
+  const confirmAndAct = (action) => {
+    if (action === "stop" || action === "restart") {
+      const confirmed = window.confirm(`Are you sure you want to ${action} the server?`);
+      if (!confirmed) return;
+    }
+    onAction(action);
+  };
+
+  const btnStyle = (color) => ({
+    background: `${color}18`,
+    border: `1px solid ${color}44`,
+    color: color,
+    padding: "6px 18px",
+    fontFamily: "JetBrains Mono",
+    fontSize: 11,
+    cursor: busyAction ? "wait" : "pointer",
+    letterSpacing: 1,
+    textTransform: "uppercase",
+    opacity: busyAction ? 0.55 : 1,
+  });
+
+  return (
+    <div style={panelStyle}>
+      <div style={{ fontSize: 11, letterSpacing: 2, color: "#00ff88", fontFamily: "JetBrains Mono", textTransform: "uppercase", marginBottom: 14, borderBottom: "1px solid rgba(0,255,136,0.15)", paddingBottom: 6 }}>
+        Server Status
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+        <span style={{
+          display: "inline-block", width: 10, height: 10, borderRadius: "50%",
+          background: dotColor, boxShadow: `0 0 8px ${dotColor}66`,
+          animation: isStarting ? "pulse 1.5s ease-in-out infinite" : "none",
+        }} />
+        <span style={{ fontSize: 14, fontFamily: "Rajdhani", fontWeight: 600, color: dotColor }}>
+          {statusLabel}
+        </span>
+      </div>
+
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+        <div style={{ background: "rgba(0,255,136,0.03)", border: "1px solid rgba(0,255,136,0.12)", padding: "10px 14px", flex: 1, minWidth: 90 }}>
+          <div style={{ fontSize: 10, color: "#667766", letterSpacing: 1.5, fontFamily: "JetBrains Mono", textTransform: "uppercase" }}>Container</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: "#00ff88", fontFamily: "Rajdhani", marginTop: 2 }}>{proc.container_id ? proc.container_id.slice(0, 12) : "\u2014"}</div>
+        </div>
+        <div style={{ background: "rgba(0,255,136,0.03)", border: "1px solid rgba(0,255,136,0.12)", padding: "10px 14px", flex: 1, minWidth: 90 }}>
+          <div style={{ fontSize: 10, color: "#667766", letterSpacing: 1.5, fontFamily: "JetBrains Mono", textTransform: "uppercase" }}>Uptime</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: "#00ff88", fontFamily: "Rajdhani", marginTop: 2 }}>{formatUptime(proc.uptime_seconds)}</div>
+        </div>
+        <div style={{ background: "rgba(0,255,136,0.03)", border: "1px solid rgba(0,255,136,0.12)", padding: "10px 14px", flex: 1, minWidth: 90 }}>
+          <div style={{ fontSize: 10, color: "#667766", letterSpacing: 1.5, fontFamily: "JetBrains Mono", textTransform: "uppercase" }}>Ping</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: "#00ff88", fontFamily: "Rajdhani", marginTop: 2 }}>{a2s.ping != null ? (a2s.ping * 1000).toFixed(1) + "ms" : "\u2014"}</div>
+        </div>
+        <div style={{ background: "rgba(0,255,136,0.03)", border: "1px solid rgba(0,255,136,0.12)", padding: "10px 14px", flex: 1, minWidth: 90 }}>
+          <div style={{ fontSize: 10, color: "#667766", letterSpacing: 1.5, fontFamily: "JetBrains Mono", textTransform: "uppercase" }}>Restarts</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: (proc.restart_count || 0) > 0 ? "#ffaa00" : "#00ff88", fontFamily: "Rajdhani", marginTop: 2 }}>{proc.restart_count ?? 0}</div>
+        </div>
+      </div>
+
+      {/* Connection info row */}
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+        <div style={{ background: "rgba(0,255,136,0.03)", border: "1px solid rgba(0,255,136,0.12)", padding: "8px 14px", flex: 1, minWidth: 130 }}>
+          <div style={{ fontSize: 10, color: "#667766", letterSpacing: 1.5, fontFamily: "JetBrains Mono", textTransform: "uppercase" }}>Game Port</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: "#00aaff", fontFamily: "JetBrains Mono", marginTop: 2 }}>UDP 2001</div>
+        </div>
+        <div style={{ background: "rgba(0,255,136,0.03)", border: "1px solid rgba(0,255,136,0.12)", padding: "8px 14px", flex: 1, minWidth: 130 }}>
+          <div style={{ fontSize: 10, color: "#667766", letterSpacing: 1.5, fontFamily: "JetBrains Mono", textTransform: "uppercase" }}>RCON</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: rcon.connected ? "#00ff88" : "#ff6644", fontFamily: "JetBrains Mono", marginTop: 2 }}>{rcon.connected ? "Connected" : "Standby"} :19999</div>
+        </div>
+        <div style={{ background: "rgba(0,255,136,0.03)", border: "1px solid rgba(0,255,136,0.12)", padding: "8px 14px", flex: 1, minWidth: 130 }}>
+          <div style={{ fontSize: 10, color: "#667766", letterSpacing: 1.5, fontFamily: "JetBrains Mono", textTransform: "uppercase" }}>A2S Query</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: a2s.online ? "#00ff88" : "#ff6644", fontFamily: "JetBrains Mono", marginTop: 2 }}>{a2s.online ? "Online" : "Offline"} :17777</div>
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 10, color: "#667766", letterSpacing: 1, fontFamily: "JetBrains Mono", marginBottom: 4 }}>
+          SERVER: <span style={{ color: "#e0e0e0" }}>{a2s.server_name || "\u2014"}</span>
+        </div>
+        <div style={{ fontSize: 10, color: "#667766", letterSpacing: 1, fontFamily: "JetBrains Mono", marginBottom: 6 }}>
+          MAP: <span style={{ color: "#889988" }}>{a2s.map_name || a2s.map || "\u2014"}</span>
+          {a2s.game && <> &middot; GAME: <span style={{ color: "#889988" }}>{a2s.game}</span></>}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 12, fontFamily: "JetBrains Mono", color: "#e0e0e0" }}>
+            {currentPlayers} / {maxPlayers} players
+          </span>
+          <div style={{ flex: 1, background: "rgba(0,255,136,0.08)", height: 6, borderRadius: 3, overflow: "hidden" }}>
+            <div style={{
+              width: `${Math.min(playerPct, 100)}%`, height: "100%",
+              background: playerPct > 80 ? "#ff4444" : playerPct > 50 ? "#ffaa00" : "#00ff88",
+              borderRadius: 3, transition: "width 0.3s ease",
+            }} />
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <button disabled={!!busyAction || isRunning} onClick={() => confirmAndAct("start")} style={btnStyle("#00ff88")}>
+          {busyAction === "server:start" ? "... Starting" : "Start"}
+        </button>
+        <button disabled={!!busyAction || !isRunning} onClick={() => confirmAndAct("stop")} style={btnStyle("#ff4444")}>
+          {busyAction === "server:stop" ? "... Stopping" : "Stop"}
+        </button>
+        <button disabled={!!busyAction || !isRunning} onClick={() => confirmAndAct("restart")} style={btnStyle("#ffaa00")}>
+          {busyAction === "server:restart" ? "... Restarting" : "Restart"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PlayerListPanel({ serverStatus, onKick, onRefresh }) {
+  const a2s = serverStatus?.a2s || {};
+  const players = a2s.players || [];
+  const isOffline = !serverStatus || serverStatus.error || !serverStatus.a2s;
+
+  return (
+    <div style={panelStyle}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, borderBottom: "1px solid rgba(0,255,136,0.15)", paddingBottom: 6 }}>
+        <div style={{ fontSize: 11, letterSpacing: 2, color: "#00ff88", fontFamily: "JetBrains Mono", textTransform: "uppercase" }}>
+          Player List
+        </div>
+        <button onClick={onRefresh} style={{
+          background: "rgba(0,255,136,0.08)", border: "1px solid rgba(0,255,136,0.2)",
+          color: "#00ff88", padding: "3px 12px", fontFamily: "JetBrains Mono", fontSize: 10,
+          cursor: "pointer", letterSpacing: 1,
+        }}>
+          Refresh
+        </button>
+      </div>
+
+      {isOffline ? (
+        <div style={{ color: "#ff4444", fontSize: 12, fontFamily: "JetBrains Mono", padding: "16px 0", textAlign: "center" }}>
+          Server offline
+        </div>
+      ) : players.length === 0 ? (
+        <div style={{ color: "#556655", fontSize: 12, fontFamily: "JetBrains Mono", padding: "16px 0", textAlign: "center" }}>
+          No players
+        </div>
+      ) : (
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, fontFamily: "JetBrains Mono" }}>
+          <thead>
+            <tr style={{ borderBottom: "1px solid rgba(0,255,136,0.1)" }}>
+              <th style={{ textAlign: "left", padding: "4px 6px", color: "#667766", fontSize: 10, letterSpacing: 1, textTransform: "uppercase", fontWeight: 500 }}>#</th>
+              <th style={{ textAlign: "left", padding: "4px 6px", color: "#667766", fontSize: 10, letterSpacing: 1, textTransform: "uppercase", fontWeight: 500 }}>Name</th>
+              <th style={{ textAlign: "left", padding: "4px 6px", color: "#667766", fontSize: 10, letterSpacing: 1, textTransform: "uppercase", fontWeight: 500 }}>Duration</th>
+              <th style={{ textAlign: "left", padding: "4px 6px", color: "#667766", fontSize: 10, letterSpacing: 1, textTransform: "uppercase", fontWeight: 500 }}>Score</th>
+              <th style={{ textAlign: "right", padding: "4px 6px", color: "#667766", fontSize: 10, letterSpacing: 1, textTransform: "uppercase", fontWeight: 500 }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {players.map((p, i) => (
+              <tr key={i} style={{ borderBottom: "1px solid rgba(0,255,136,0.05)" }}>
+                <td style={{ padding: "5px 6px", color: "#556655" }}>{i + 1}</td>
+                <td style={{ padding: "5px 6px", color: "#e0e0e0" }}>{p.name || "\u2014"}</td>
+                <td style={{ padding: "5px 6px", color: "#889988" }}>{fmtTime(p.duration)}</td>
+                <td style={{ padding: "5px 6px", color: "#889988" }}>{p.score ?? "\u2014"}</td>
+                <td style={{ padding: "5px 6px", textAlign: "right" }}>
+                  <button onClick={() => onKick(p.id ?? p.name)} style={{
+                    background: "rgba(255,68,68,0.08)", border: "1px solid rgba(255,68,68,0.25)",
+                    color: "#ff4444", padding: "2px 10px", fontFamily: "JetBrains Mono",
+                    fontSize: 10, cursor: "pointer", letterSpacing: 0.5,
+                  }}>
+                    Kick
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function RconConsole({ fetchJson }) {
+  const [input, setInput] = useState("");
+  const [history, setHistory] = useState([]);
+  const [cmdHistory, setCmdHistory] = useState([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const outputRef = useRef(null);
+
+  const scrollToBottom = useCallback(() => {
+    if (outputRef.current) {
+      outputRef.current.scrollTop = outputRef.current.scrollHeight;
+    }
+  }, []);
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [history, scrollToBottom]);
+
+  const sendCommand = useCallback(async (cmd) => {
+    if (!cmd.trim()) return;
+    const timestamp = new Date().toLocaleTimeString();
+    setHistory((prev) => [...prev, { type: "cmd", text: cmd, time: timestamp }].slice(-MAX_RCON_HISTORY));
+    setCmdHistory((prev) => [...prev, cmd].slice(-50));
+    setHistoryIndex(-1);
+    setInput("");
+
+    try {
+      const data = await fetchJson("/api/server/rcon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: cmd }),
+      });
+      const responseTime = new Date().toLocaleTimeString();
+      setHistory((prev) => [...prev, { type: "res", text: data.response || data.result || "(no response)", time: responseTime }].slice(-MAX_RCON_HISTORY));
+    } catch (e) {
+      const errorTime = new Date().toLocaleTimeString();
+      setHistory((prev) => [...prev, { type: "err", text: `Error: ${e.message}`, time: errorTime }].slice(-MAX_RCON_HISTORY));
+    }
+  }, [fetchJson]);
+
+  const handleKeyDown = useCallback((e) => {
+    if (e.key === "Enter") {
+      sendCommand(input);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (cmdHistory.length === 0) return;
+      const newIndex = historyIndex === -1 ? cmdHistory.length - 1 : Math.max(0, historyIndex - 1);
+      setHistoryIndex(newIndex);
+      setInput(cmdHistory[newIndex]);
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (historyIndex === -1) return;
+      const newIndex = historyIndex + 1;
+      if (newIndex >= cmdHistory.length) {
+        setHistoryIndex(-1);
+        setInput("");
+      } else {
+        setHistoryIndex(newIndex);
+        setInput(cmdHistory[newIndex]);
+      }
+    }
+  }, [input, cmdHistory, historyIndex, sendCommand]);
+
+  return (
+    <div style={panelStyle}>
+      <div style={{ fontSize: 11, letterSpacing: 2, color: "#00ff88", fontFamily: "JetBrains Mono", textTransform: "uppercase", marginBottom: 14, borderBottom: "1px solid rgba(0,255,136,0.15)", paddingBottom: 6 }}>
+        RCON Console
+      </div>
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        {RCON_QUICK_ACTIONS.map((qa) => (
+          <button key={qa.label} onClick={() => sendCommand(qa.cmd)} style={{
+            background: "rgba(0,255,136,0.06)", border: "1px solid rgba(0,255,136,0.15)",
+            color: "#889988", padding: "3px 12px", fontFamily: "JetBrains Mono",
+            fontSize: 10, cursor: "pointer", letterSpacing: 0.5,
+          }}>
+            {qa.label}
+          </button>
+        ))}
+      </div>
+
+      <div ref={outputRef} style={{
+        background: "rgba(0,0,0,0.3)", border: "1px solid rgba(0,255,136,0.1)",
+        borderRadius: 4, padding: 10, height: 240, overflowY: "auto",
+        fontFamily: "JetBrains Mono", fontSize: 11, marginBottom: 10,
+      }}>
+        {history.length === 0 ? (
+          <div style={{ color: "#445544" }}>RCON console ready. Type a command below.</div>
+        ) : (
+          history.map((entry, i) => (
+            <div key={i} style={{ marginBottom: 4, lineHeight: 1.5 }}>
+              <span style={{ color: "#445544", fontSize: 10 }}>[{entry.time}] </span>
+              {entry.type === "cmd" && (
+                <span style={{ color: "#00ff88" }}>&gt; {entry.text}</span>
+              )}
+              {entry.type === "res" && (
+                <span style={{ color: "#e0e0e0", whiteSpace: "pre-wrap" }}>{entry.text}</span>
+              )}
+              {entry.type === "err" && (
+                <span style={{ color: "#ff4444" }}>{entry.text}</span>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Enter RCON command..."
+          style={{
+            flex: 1, background: "rgba(0,255,136,0.05)", border: "1px solid rgba(0,255,136,0.15)",
+            color: "#e0e0e0", padding: "6px 10px", fontSize: 12, fontFamily: "JetBrains Mono",
+            outline: "none", borderRadius: 4,
+          }}
+        />
+        <button onClick={() => sendCommand(input)} style={{
+          background: "rgba(0,255,136,0.12)", border: "1px solid rgba(0,255,136,0.3)",
+          color: "#00ff88", padding: "6px 18px", fontFamily: "JetBrains Mono",
+          fontSize: 11, cursor: "pointer", letterSpacing: 1,
+        }}>
+          Send
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ServerConfigViewer({ fetchJson }) {
+  const [config, setConfig] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const loadConfig = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchJson("/api/server/config");
+      setConfig(data);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [fetchJson]);
+
+  useEffect(() => {
+    loadConfig();
+  }, [loadConfig]);
+
+  return (
+    <div style={panelStyle}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, borderBottom: "1px solid rgba(0,255,136,0.15)", paddingBottom: 6 }}>
+        <div style={{ fontSize: 11, letterSpacing: 2, color: "#00ff88", fontFamily: "JetBrains Mono", textTransform: "uppercase" }}>
+          Server Configuration
+        </div>
+        <button onClick={loadConfig} disabled={loading} style={{
+          background: "rgba(0,255,136,0.08)", border: "1px solid rgba(0,255,136,0.2)",
+          color: "#00ff88", padding: "3px 12px", fontFamily: "JetBrains Mono", fontSize: 10,
+          cursor: loading ? "wait" : "pointer", letterSpacing: 1, opacity: loading ? 0.6 : 1,
+        }}>
+          {loading ? "Loading..." : "Refresh"}
+        </button>
+      </div>
+
+      {error ? (
+        <div style={{ color: "#ff4444", fontSize: 12, fontFamily: "JetBrains Mono", padding: "16px 0", textAlign: "center" }}>
+          {error}
+        </div>
+      ) : config ? (
+        <div style={{
+          background: "rgba(0,0,0,0.3)", border: "1px solid rgba(0,255,136,0.1)",
+          borderRadius: 4, padding: 12, maxHeight: 300, overflowY: "auto",
+          fontFamily: "JetBrains Mono", fontSize: 11, lineHeight: 1.6, color: "#e0e0e0",
+        }}>
+          <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}
+            dangerouslySetInnerHTML={{ __html: syntaxHighlightJson(config) }}
+          />
+        </div>
+      ) : (
+        <div style={{ color: "#556655", fontSize: 12, fontFamily: "JetBrains Mono", padding: "16px 0", textAlign: "center" }}>
+          Loading configuration...
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ServerTab({ serverStatus, serverError, fetchJson, onServerAction, busyAction, onRefreshPlayers, onKickPlayer, metrics, health }) {
+  const [subTab, setSubTab] = useState("health");
+
+  if (serverError) {
+    return (
+      <div style={{
+        background: "#0d1a0d", border: "1px solid rgba(0,255,136,0.08)",
+        borderRadius: 8, padding: 32, textAlign: "center", marginTop: 8,
+      }}>
+        <div style={{ fontSize: 16, fontFamily: "Rajdhani", fontWeight: 600, color: "#ff4444", marginBottom: 10 }}>
+          Server Management Not Configured
+        </div>
+        <div style={{ fontSize: 12, fontFamily: "JetBrains Mono", color: "#667766", lineHeight: 1.6, maxWidth: 480, margin: "0 auto" }}>
+          The server management API is not available. Ensure the server manager module is enabled
+          and the Arma Reforger dedicated server path is configured in your middleware settings.
+        </div>
+        <div style={{ fontSize: 11, fontFamily: "JetBrains Mono", color: "#556655", marginTop: 16 }}>
+          Endpoint: GET /api/server/status returned an error
+        </div>
+      </div>
+    );
+  }
+
+  const a2s = serverStatus?.a2s || {};
+
+  const subTabStyle = (t) => ({
+    padding: "6px 16px",
+    fontFamily: "JetBrains Mono",
+    fontSize: 10,
+    letterSpacing: 1.5,
+    textTransform: "uppercase",
+    cursor: "pointer",
+    background: subTab === t ? "rgba(0,255,136,0.1)" : "transparent",
+    color: subTab === t ? "#00ff88" : "#556655",
+    border: "none",
+    borderBottom: subTab === t ? "2px solid #00ff88" : "2px solid transparent",
+    transition: "all 0.15s",
+  });
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      {/* Alert Banner */}
+      <AlertBanner serverStatus={serverStatus} metrics={metrics} health={health} />
+
+      {/* Sub-tabs */}
+      <div style={{ display: "flex", borderBottom: "1px solid rgba(0,255,136,0.08)", marginBottom: 12 }}>
+        <button style={subTabStyle("health")} onClick={() => setSubTab("health")}>Health</button>
+        <button style={subTabStyle("logs")} onClick={() => setSubTab("logs")}>Logs</button>
+        <button style={subTabStyle("controls")} onClick={() => setSubTab("controls")}>Controls</button>
+        <button style={subTabStyle("diagnostics")} onClick={() => setSubTab("diagnostics")}>Diagnostics</button>
+      </div>
+
+      {/* HEALTH sub-tab */}
+      {subTab === "health" && (
+        <>
+          <IHOPHealthDashboard serverStatus={serverStatus} metrics={metrics} health={health} />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+            <ResourceGauges metrics={metrics} />
+            <UptimeTimeline serverStatus={serverStatus} />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+            <PerformanceScoreboard serverStatus={serverStatus} metrics={metrics} health={health} />
+            <PlayerActivityChart currentPlayerCount={a2s.player_count ?? 0} maxPlayers={a2s.max_players ?? 64} />
+          </div>
+        </>
+      )}
+
+      {/* LOGS sub-tab */}
+      {subTab === "logs" && (
+        <ServerLogStream />
+      )}
+
+      {/* CONTROLS sub-tab */}
+      {subTab === "controls" && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <ServerStatusPanel serverStatus={serverStatus} onAction={onServerAction} busyAction={busyAction} />
+            <PlayerListPanel serverStatus={serverStatus} onKick={onKickPlayer} onRefresh={onRefreshPlayers} />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+            <RconConsole fetchJson={fetchJson} />
+            <ServerConfigViewer fetchJson={fetchJson} />
+          </div>
+        </>
+      )}
+
+      {/* DIAGNOSTICS sub-tab */}
+      {subTab === "diagnostics" && (
+        <QuickDiagnostics fetchJson={fetchJson} serverStatus={serverStatus} />
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════
 // MAIN DASHBOARD
 // ═══════════════════════════════════════════════
 
@@ -762,9 +1810,13 @@ function Dashboard() {
   const [tab, setTab] = useState("overview");
   const [actionStatus, setActionStatus] = useState(null);
   const [busyAction, setBusyAction] = useState("");
+  const [serverStatus, setServerStatus] = useState(null);
+  const [serverError, setServerError] = useState(null);
+  const [serverMetrics, setServerMetrics] = useState(null);
   const serverUrl = API_BASE;
   const logRef = useRef(null);
   const actionStatusTimerRef = useRef(null);
+  const serverPollRef = useRef(null);
 
   const showActionStatus = useCallback((type, message) => {
     if (actionStatusTimerRef.current) clearTimeout(actionStatusTimerRef.current);
@@ -873,6 +1925,56 @@ function Dashboard() {
     return () => clearInterval(iv);
   }, [fetchData]);
 
+  // Server tab polling: only poll when server tab is active
+  const fetchServerStatus = useCallback(async () => {
+    try {
+      const [statusData, metricsData] = await Promise.all([
+        fetchJson("/api/server/status"),
+        fetchJson("/api/server/metrics").catch(() => null),
+      ]);
+      setServerStatus(statusData);
+      if (metricsData) setServerMetrics(metricsData);
+      setServerError(null);
+    } catch (e) {
+      setServerError(e.message);
+    }
+  }, [fetchJson]);
+
+  useEffect(() => {
+    if (tab !== "server") return;
+    fetchServerStatus();
+    serverPollRef.current = setInterval(fetchServerStatus, POLL_INTERVAL);
+    return () => clearInterval(serverPollRef.current);
+  }, [tab, fetchServerStatus]);
+
+  const handleServerAction = useCallback(async (action) => {
+    const busyKey = `server:${action}`;
+    setBusyAction(busyKey);
+    try {
+      await fetchJson(`/api/server/${action}`, { method: "POST" });
+      showActionStatus("success", `Server ${action} command sent.`);
+      await fetchServerStatus();
+    } catch (e) {
+      showActionStatus("error", `Server ${action} failed: ${e.message}`);
+    } finally {
+      setBusyAction("");
+    }
+  }, [fetchJson, fetchServerStatus, showActionStatus]);
+
+  const handleKickPlayer = useCallback(async (playerId) => {
+    try {
+      await fetchJson("/api/server/rcon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: `kick ${playerId}` }),
+      });
+      showActionStatus("success", `Kick command sent for player ${playerId}.`);
+      await fetchServerStatus();
+    } catch (e) {
+      showActionStatus("error", `Kick failed: ${e.message}`);
+    }
+  }, [fetchJson, fetchServerStatus, showActionStatus]);
+
   const state = gameState?.state || {};
   const friendlyUnits = state.friendly_units || [];
   const enemyUnits = state.enemy_units || [];
@@ -946,6 +2048,7 @@ function Dashboard() {
         <button style={tabStyle("commands")} onClick={() => setTab("commands")}>Command Log</button>
         <button style={tabStyle("intel")} onClick={() => setTab("intel")}>Intel</button>
         <button style={tabStyle("manual")} onClick={() => setTab("manual")}>Manual Control</button>
+        <button style={tabStyle("server")} onClick={() => setTab("server")}>Server</button>
       </div>
 
       <div style={{ padding: "16px 24px 40px", maxWidth: 1600 }}>
@@ -1768,6 +2871,21 @@ function Dashboard() {
               </button>
             </div>
           </>
+        )}
+
+        {/* SERVER TAB */}
+        {tab === "server" && (
+          <ServerTab
+            serverStatus={serverStatus}
+            serverError={serverError}
+            fetchJson={fetchJson}
+            onServerAction={handleServerAction}
+            busyAction={busyAction}
+            onRefreshPlayers={fetchServerStatus}
+            onKickPlayer={handleKickPlayer}
+            metrics={serverMetrics}
+            health={health}
+          />
         )}
       </div>
 

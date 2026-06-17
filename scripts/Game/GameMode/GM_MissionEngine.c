@@ -281,8 +281,12 @@ class GM_MissionEngine
         string minefieldId = "mines_" + m_iMinefieldCounter;
         ref array<SCR_BaseTriggerEntity> mines = {};
 
-        float triggerRadius = (mineType == "anti_vehicle") ? 5.0 : 3.0;
-        string explosionSize = (mineType == "anti_vehicle") ? "large" : "small";
+        float triggerRadius = 3.0;
+        if (mineType == "anti_vehicle")
+            triggerRadius = 5.0;
+        string explosionSize = "small";
+        if (mineType == "anti_vehicle")
+            explosionSize = "large";
 
         GM_TriggerManager triggerMgr = m_pOwner.GetTriggerManager();
         if (!triggerMgr)

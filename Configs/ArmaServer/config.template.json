@@ -1,0 +1,55 @@
+{
+  "bindAddress": "",
+  "bindPort": __GAME_PORT__,
+  "publicAddress": "",
+  "publicPort": __GAME_PORT__,
+  "a2s": {
+    "address": "0.0.0.0",
+    "port": __A2S_PORT__
+  },
+  "rcon": {
+    "address": "__RCON_BIND_ADDRESS__",
+    "port": __RCON_PORT__,
+    "password": "__RCON_PASSWORD__",
+    "maxClients": 16,
+    "permission": "admin",
+    "blacklist": [],
+    "whitelist": []
+  },
+  "game": {
+    "name": "__SERVER_NAME__",
+    "password": "",
+    "passwordAdmin": "__ADMIN_PASSWORD__",
+    "admins": [],
+    "scenarioId": "{__SCENARIO_ID__}ArmaReforger/Worlds/MP/CTI_Everon.ent",
+    "maxPlayers": __MAX_PLAYERS__,
+    "visible": true,
+    "crossPlatform": true,
+    "supportedPlatforms": ["PLATFORM_PC", "PLATFORM_XBL"],
+    "gameProperties": {
+      "serverMaxViewDistance": 2500,
+      "serverMinGrassDistance": 50,
+      "networkViewDistance": 2500,
+      "disableThirdPerson": true,
+      "fastValidation": true,
+      "battlEye": true,
+      "VONDisableUI": false,
+      "VONDisableDirectSpeechUI": false,
+      "VONCanTransmitCrossFaction": false
+    },
+    "mods": []
+  },
+  "operating": {
+    "lobbyPlayerSynchronise": true,
+    "disableCrashReporter": false,
+    "disableNavmeshStreaming": [],
+    "disableServerShutdown": false,
+    "disableAI": false,
+    "playerSaveTime": 120,
+    "aiLimit": -1,
+    "slotReservationTimeout": 60,
+    "joinQueue": {
+      "maxSize": 12
+    }
+  }
+}

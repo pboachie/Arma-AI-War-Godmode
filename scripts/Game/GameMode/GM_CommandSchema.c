@@ -115,6 +115,30 @@ class GM_TerrainSample : JsonApiStruct
     }
 }
 
+class GM_SpawnAnchor : JsonApiStruct
+{
+    string anchor_id;
+    string name;
+    vector position;
+    string anchor_type;         // "neutral_base", "road_junction", "roadblock_candidate"
+    string control_state;       // "neutral", "opfor", "blufor", "unassigned"
+    float tactical_radius;      // recommended operating radius in meters
+    float priority;             // 0.0-1.0 suggestion weight
+    string notes;               // short human/LLM hint for how to use this anchor
+
+    void GM_SpawnAnchor()
+    {
+        RegV("anchor_id");
+        RegV("name");
+        RegV("position");
+        RegV("anchor_type");
+        RegV("control_state");
+        RegV("tactical_radius");
+        RegV("priority");
+        RegV("notes");
+    }
+}
+
 class GM_WeatherTacticalContext : JsonApiStruct
 {
     float visibility_range_meters;
@@ -143,33 +167,9 @@ class GM_WeatherTacticalContext : JsonApiStruct
     }
 }
 
-class GM_MissionState : JsonApiStruct
-{
-    string current_archetype;       // "patrol_ambush", "fob_defense", etc.
-    string current_phase;           // "deployment", "patrol", "contact", "engagement", etc.
-    float mission_progress;         // 0.0-1.0
-    float tension_level;            // 0.0-1.0
-    string alert_level;             // "green", "yellow", "orange", "red"
-    int wave_number;
-    string active_objective;
-    int total_enemy_kills;
-    int total_friendly_losses;
-    float force_ratio;
-
-    void GM_MissionState()
-    {
-        RegV("current_archetype");
-        RegV("current_phase");
-        RegV("mission_progress");
-        RegV("tension_level");
-        RegV("alert_level");
-        RegV("wave_number");
-        RegV("active_objective");
-        RegV("total_enemy_kills");
-        RegV("total_friendly_losses");
-        RegV("force_ratio");
-    }
-}
+// NOTE: GM_MissionState is defined in GM_MissionEngine.c (canonical definition)
+// with extended fields for escalation tracking, casualty rates, and force assessment.
+// Do not redefine it here to avoid duplicate class errors.
 
 class GM_AmbientState : JsonApiStruct
 {
@@ -196,6 +196,7 @@ class GM_GameState : JsonApiStruct
     ref array<ref GM_ContactReport> contacts;
     ref array<ref GM_PlayerState> players;
     string current_weather;
+    bool weather_controls_available;
     float time_of_day;
     int player_count;
     ref array<string> recent_events;
@@ -208,6 +209,9 @@ class GM_GameState : JsonApiStruct
 
     // Terrain context (Priority 5)
     ref array<ref GM_TerrainSample> terrain_samples;
+
+    // Curated spawn / control anchors configured in Workbench
+    ref array<ref GM_SpawnAnchor> spawn_anchors;
 
     // Mission engine state (for LLM mission-aware decisions)
     ref GM_MissionState mission_state;
@@ -225,6 +229,7 @@ class GM_GameState : JsonApiStruct
         RegV("contacts");
         RegV("players");
         RegV("current_weather");
+        RegV("weather_controls_available");
         RegV("time_of_day");
         RegV("player_count");
         RegV("recent_events");
@@ -235,6 +240,7 @@ class GM_GameState : JsonApiStruct
         RegV("total_spawned_groups");
         RegV("total_spawned_vehicles");
         RegV("terrain_samples");
+        RegV("spawn_anchors");
         RegV("mission_state");
         RegV("weather_tactical_context");
         RegV("ambient_state");
@@ -274,14 +280,30 @@ class GM_Command : JsonApiStruct
         RegV("sync_group");
     }
 
+    protected bool HasUsableTargetPosition()
+    {
+        if (target_position == "") return false;
+
+        array<string> parts = {};
+        target_position.Split(",", parts, false);
+        if (parts.Count() < 3) return false;
+
+        for (int i = 0; i < 3; i++)
+        {
+            if (parts[i].Trim() == "")
+                return false;
+        }
+
+        return true;
+    }
+
     // Parse "123.4,56.7,890.1" → vector
     vector GetTargetVector()
     {
-        if (target_position == "") return vector.Zero;
+        if (!HasUsableTargetPosition()) return vector.Zero;
 
         array<string> parts = {};
-        target_position.Split(",", parts);
-        if (parts.Count() < 3) return vector.Zero;
+        target_position.Split(",", parts, false);
 
         return Vector(
             parts[0].Trim().ToFloat(),
@@ -295,55 +317,119 @@ class GM_Command : JsonApiStruct
     {
         if (command_type == "") return false;
 
-        // Spawn commands need parameters
-        if (command_type == "spawn_infantry" || command_type == "spawn_vehicle" || command_type == "spawn_reinforcements")
+        // Spawn commands need parameters + target_position
+        if (command_type == GM_CommandTypes.SPAWN_INFANTRY ||
+            command_type == GM_CommandTypes.SPAWN_VEHICLE ||
+            command_type == GM_CommandTypes.SPAWN_REINFORCEMENTS)
         {
             if (parameters == "") return false;
-            if (target_position == "") return false;
+            if (!HasUsableTargetPosition()) return false;
         }
 
-        // Movement commands need a target
-        if (command_type == "move" || command_type == "attack" || command_type == "defend" ||
-            command_type == "patrol" || command_type == "retreat")
+        // Movement commands need unit_id + target_position
+        if (command_type == GM_CommandTypes.MOVE ||
+            command_type == GM_CommandTypes.ATTACK ||
+            command_type == GM_CommandTypes.DEFEND ||
+            command_type == GM_CommandTypes.PATROL ||
+            command_type == GM_CommandTypes.RETREAT ||
+            command_type == GM_CommandTypes.SET_AMBUSH ||
+            command_type == GM_CommandTypes.SEEK_AND_DESTROY)
         {
             if (unit_id == "") return false;
-            if (target_position == "") return false;
+            if (!HasUsableTargetPosition()) return false;
         }
 
-        // Advanced tactical commands need unit_id and target_position
-        if (command_type == "suppress" || command_type == "overwatch" ||
-            command_type == "breach" || command_type == "flank_left" ||
-            command_type == "flank_right" || command_type == "garrison" ||
-            command_type == "set_keyhole" || command_type == "establish_op" ||
-            command_type == "fighting_withdrawal" || command_type == "silent_move" ||
-            command_type == "bounding_overwatch" || command_type == "coordinated_operation")
+        // Advanced tactical commands need unit_id + target_position
+        if (command_type == GM_CommandTypes.SUPPRESS ||
+            command_type == GM_CommandTypes.OVERWATCH ||
+            command_type == GM_CommandTypes.BREACH ||
+            command_type == GM_CommandTypes.FLANK_LEFT ||
+            command_type == GM_CommandTypes.FLANK_RIGHT ||
+            command_type == GM_CommandTypes.GARRISON ||
+            command_type == GM_CommandTypes.SET_KEYHOLE ||
+            command_type == GM_CommandTypes.ESTABLISH_OP ||
+            command_type == GM_CommandTypes.SILENT_MOVE ||
+            command_type == GM_CommandTypes.BOUNDING_OVERWATCH ||
+            command_type == GM_CommandTypes.COORDINATED_OP)
         {
             if (unit_id == "") return false;
-            if (target_position == "") return false;
+            if (!HasUsableTargetPosition()) return false;
         }
 
-        // Patrol variants need unit_id and target_position
-        if (command_type == "patrol_cloverleaf" || command_type == "patrol_zigzag")
+        // Fighting withdrawal needs unit_id but uses parameters, not target_position
+        if (command_type == GM_CommandTypes.FIGHTING_WITHDRAWAL)
         {
             if (unit_id == "") return false;
-            if (target_position == "") return false;
         }
 
-        // Vehicle tactical commands need unit_id and target_position
-        if (command_type == "hull_down" || command_type == "overwatch_position" ||
-            command_type == "dismount_assault" || command_type == "cas_run" ||
-            command_type == "troop_insert" || command_type == "convoy_form" ||
-            command_type == "vehicle_screen" || command_type == "air_patrol")
+        // Patrol variants need unit_id + target_position
+        if (command_type == GM_CommandTypes.PATROL_CLOVERLEAF ||
+            command_type == GM_CommandTypes.PATROL_ZIGZAG)
         {
             if (unit_id == "") return false;
-            if (target_position == "") return false;
+            if (!HasUsableTargetPosition()) return false;
         }
 
-        // Artillery / fire-support effects need target_position
-        if (command_type == "artillery_barrage" || command_type == "building_fire" ||
-            command_type == "distant_combat_ambience")
+        // Vehicle tactical commands need unit_id + target_position
+        if (command_type == GM_CommandTypes.HULL_DOWN ||
+            command_type == GM_CommandTypes.OVERWATCH_POSITION ||
+            command_type == GM_CommandTypes.DISMOUNT_ASSAULT ||
+            command_type == GM_CommandTypes.CAS_RUN ||
+            command_type == GM_CommandTypes.TROOP_INSERT ||
+            command_type == GM_CommandTypes.CONVOY_FORM ||
+            command_type == GM_CommandTypes.VEHICLE_SCREEN ||
+            command_type == GM_CommandTypes.AIR_PATROL)
         {
-            if (target_position == "") return false;
+            if (unit_id == "") return false;
+            if (!HasUsableTargetPosition()) return false;
+        }
+
+        // Effects need target_position
+        if (command_type == GM_CommandTypes.EXPLOSION ||
+            command_type == GM_CommandTypes.SMOKE ||
+            command_type == GM_CommandTypes.FLARE)
+        {
+            if (!HasUsableTargetPosition()) return false;
+        }
+
+        // Fire support needs target_position
+        if (command_type == GM_CommandTypes.MORTAR_STRIKE ||
+            command_type == GM_CommandTypes.AIR_SUPPORT)
+        {
+            if (!HasUsableTargetPosition()) return false;
+        }
+
+        // Logistics need target_position
+        if (command_type == GM_CommandTypes.SUPPLY_DROP ||
+            command_type == GM_CommandTypes.SPAWN_CONVOY)
+        {
+            if (!HasUsableTargetPosition()) return false;
+        }
+
+        // Artillery / advanced environment effects need target_position
+        if (command_type == GM_CommandTypes.ARTILLERY_BARRAGE ||
+            command_type == GM_CommandTypes.BUILDING_FIRE ||
+            command_type == GM_CommandTypes.DISTANT_COMBAT)
+        {
+            if (!HasUsableTargetPosition()) return false;
+        }
+
+        // Cleanup area needs target_position (cleanup_dead and despawn_unit do not)
+        if (command_type == GM_CommandTypes.CLEANUP_AREA)
+        {
+            if (!HasUsableTargetPosition()) return false;
+        }
+
+        // Despawn needs unit_id
+        if (command_type == GM_CommandTypes.DESPAWN_UNIT)
+        {
+            if (unit_id == "") return false;
+        }
+
+        // Objective create needs target_position for marker placement
+        if (command_type == GM_CommandTypes.OBJECTIVE_CREATE)
+        {
+            if (!HasUsableTargetPosition()) return false;
         }
 
         return true;
@@ -359,6 +445,11 @@ class GM_CommandBatch : JsonApiStruct
 
     void GM_CommandBatch()
     {
+        commands = {};
+        narrative_broadcast = "";
+        weather_command = "";
+        time_override = -1;
+
         RegV("commands");
         RegV("narrative_broadcast");
         RegV("weather_command");
@@ -473,6 +564,7 @@ class GM_CommandTypes
     static const string RADIO_COMMS         = "radio_comms";
     static const string INTEL_FEED          = "intel_feed";
     static const string FACTION_COMMS       = "faction_comms";
+    static const string INTERCEPTED_COMMS   = "intercepted_comms";
     static const string PLAYER_ACK          = "player_acknowledgment";
     static const string PACING_DIRECTIVE    = "pacing_directive";
     static const string ENVIRONMENT_MOOD    = "environment_mood";

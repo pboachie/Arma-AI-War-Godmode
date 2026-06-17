@@ -19,11 +19,11 @@ class GM_CleanupEntry
 // to prevent access violations when entities are deleted before cleanup fires
 class GM_CleanupEntryById
 {
-    int entityId;
+    EntityID entityId;
     float cleanupTime;
     int retryCount;
 
-    void GM_CleanupEntryById(int id, float time)
+    void GM_CleanupEntryById(EntityID id, float time)
     {
         entityId = id;
         cleanupTime = time;
@@ -67,9 +67,9 @@ class GM_CleanupSystem
     // ID-based scheduling — stores entity ID instead of raw reference.
     // Prevents access violations when the engine deletes the entity
     // before the cleanup timer fires.
-    void ScheduleCleanupById(int entityId, float delaySeconds)
+    void ScheduleCleanupById(EntityID entityId, float delaySeconds)
     {
-        if (entityId == 0) return;
+        if (!entityId) return;
 
         float cleanupAt = m_fGameTime + delaySeconds;
         m_aCleanupByIdQueue.Insert(new GM_CleanupEntryById(entityId, cleanupAt));
@@ -80,9 +80,14 @@ class GM_CleanupSystem
     // Periodic Cleanup Pass (called from EOnFrame)
     // ═══════════════════════════════════════════════
 
+    // Update game time from actual elapsed time instead of approximating
+    void UpdateGameTime(float actualGameTime)
+    {
+        m_fGameTime = actualGameTime;
+    }
+
     void RunCleanupPass()
     {
-        m_fGameTime += 10.0; // Approximate, called every ~10s
 
         int cleaned = 0;
 

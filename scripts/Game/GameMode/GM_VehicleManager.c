@@ -9,6 +9,110 @@ class GM_VehicleManager
     // Limits (configurable)
     protected int m_iMaxVehicles = 20;
 
+    // ── Runtime prefab cache (auto-discovered from entity catalog) ──
+    protected ref map<string, ResourceName> m_mCatalogVehicles = new map<string, ResourceName>();
+    protected bool m_bCatalogReady = false;
+
+    void Init()
+    {
+        m_mCatalogVehicles = new map<string, ResourceName>();
+    }
+
+    protected void EnsureCatalog()
+    {
+        if (m_bCatalogReady) return;
+
+        SCR_EntityCatalogManagerComponent catalogMgr = SCR_EntityCatalogManagerComponent.GetInstance();
+        if (!catalogMgr) return;
+
+        SCR_EntityCatalog vehicleCatalog = catalogMgr.GetEntityCatalogOfType(EEntityCatalogType.VEHICLE);
+        if (!vehicleCatalog) return;
+
+        array<SCR_EntityCatalogEntry> entries = new array<SCR_EntityCatalogEntry>();
+        vehicleCatalog.GetEntityList(entries);
+        if (entries.Count() == 0) return;
+
+        foreach (SCR_EntityCatalogEntry entry : entries)
+        {
+            ResourceName prefab = entry.GetPrefab();
+            string s = "" + prefab;
+
+            if (s.Contains("BTR70"))         m_mCatalogVehicles.Set("btr70", prefab);
+            else if (s.Contains("UAZ469_DShK") || s.Contains("UAZ469_Dshk"))
+                                             m_mCatalogVehicles.Set("uaz469_mg", prefab);
+            else if (s.Contains("UAZ469"))   m_mCatalogVehicles.Set("uaz469", prefab);
+            else if (s.Contains("BMP1"))     m_mCatalogVehicles.Set("bmp1", prefab);
+            else if (s.Contains("T72"))      m_mCatalogVehicles.Set("t72", prefab);
+            else if (s.Contains("Ural4320")) m_mCatalogVehicles.Set("ural_truck", prefab);
+            else if (s.Contains("UH1H"))     m_mCatalogVehicles.Set("uh1h", prefab);
+            else if (s.Contains("M998") && s.Contains("MG"))
+                                             m_mCatalogVehicles.Set("m998_humvee_mg", prefab);
+            else if (s.Contains("M998"))     m_mCatalogVehicles.Set("m998_humvee", prefab);
+            else if (s.Contains("M151A2"))   m_mCatalogVehicles.Set("m151_jeep", prefab);
+            else if (s.Contains("M35A2"))    m_mCatalogVehicles.Set("m35_truck", prefab);
+        }
+
+        // Also discover character prefabs for crew
+        SCR_EntityCatalog charCatalog = catalogMgr.GetEntityCatalogOfType(EEntityCatalogType.CHARACTER);
+        if (charCatalog)
+        {
+            array<SCR_EntityCatalogEntry> charEntries = new array<SCR_EntityCatalogEntry>();
+            charCatalog.GetEntityList(charEntries);
+            foreach (SCR_EntityCatalogEntry cEntry : charEntries)
+            {
+                ResourceName cPrefab = cEntry.GetPrefab();
+                string cs = "" + cPrefab;
+                if (cs.Contains("USSR") && cs.Contains("Rifleman") && !m_mCatalogVehicles.Contains("_crew_ussr"))
+                    m_mCatalogVehicles.Set("_crew_ussr", cPrefab);
+                else if (cs.Contains("US") && cs.Contains("Rifleman") && !m_mCatalogVehicles.Contains("_crew_us"))
+                    m_mCatalogVehicles.Set("_crew_us", cPrefab);
+            }
+        }
+
+        m_bCatalogReady = (m_mCatalogVehicles.Count() > 0);
+        Print("[GodMode:Vehicle] Catalog discovery: found " + m_mCatalogVehicles.Count() + " entries (vehicles + crew)");
+        for (int i = 0; i < m_mCatalogVehicles.Count(); i++)
+            Print("[GodMode:Vehicle]   " + m_mCatalogVehicles.GetKey(i) + " = " + m_mCatalogVehicles.GetElement(i));
+    }
+
+    protected ResourceName ResolveVehiclePrefab(string vehType)
+    {
+        EnsureCatalog();
+
+        ResourceName found;
+        if (m_mCatalogVehicles.Find(vehType, found))
+            return found;
+
+        // Alias resolution
+        if (vehType == "btr" || vehType == "apc")
+            { if (m_mCatalogVehicles.Find("btr70", found)) return found; }
+        if (vehType == "uaz" || vehType == "uaz_mg" || vehType == "uaz_dshk")
+        {
+            string k = "uaz469";
+            if (vehType != "uaz") k = "uaz469_mg";
+            if (m_mCatalogVehicles.Find(k, found)) return found;
+        }
+        if (vehType == "bmp" || vehType == "ifv")
+            { if (m_mCatalogVehicles.Find("bmp1", found)) return found; }
+        if (vehType == "tank" || vehType == "t72a")
+            { if (m_mCatalogVehicles.Find("t72", found)) return found; }
+        if (vehType == "humvee" || vehType == "m998")
+            { if (m_mCatalogVehicles.Find("m998_humvee", found)) return found; }
+        if (vehType == "humvee_mg" || vehType == "m998_mg")
+            { if (m_mCatalogVehicles.Find("m998_humvee_mg", found)) return found; }
+        if (vehType == "truck" || vehType == "ural" || vehType == "ussr_truck")
+            { if (m_mCatalogVehicles.Find("ural_truck", found)) return found; }
+        if (vehType == "helicopter" || vehType == "heli" || vehType == "huey" || vehType == "uh1")
+            { if (m_mCatalogVehicles.Find("uh1h", found)) return found; }
+        if (vehType == "jeep" || vehType == "m151")
+            { if (m_mCatalogVehicles.Find("m151_jeep", found)) return found; }
+        if (vehType == "us_truck" || vehType == "m35")
+            { if (m_mCatalogVehicles.Find("m35_truck", found)) return found; }
+
+        // Fall back to hardcoded
+        return GetVehiclePrefab(vehType);
+    }
+
     // ═══════════════════════════════════════════════
     // Spawning
     // ═══════════════════════════════════════════════
@@ -22,7 +126,7 @@ class GM_VehicleManager
             return "";
         }
 
-        ResourceName prefab = GetVehiclePrefab(vehicleType);
+        ResourceName prefab = ResolveVehiclePrefab(vehicleType);
         if (prefab == "")
         {
             Print("[GodMode:Vehicle] Unknown type: " + vehicleType, LogLevel.WARNING);
@@ -32,8 +136,45 @@ class GM_VehicleManager
         Resource res = Resource.Load(prefab);
         if (!res || !res.IsValid())
         {
-            Print("[GodMode:Vehicle] Failed to load: " + prefab, LogLevel.ERROR);
-            return "";
+            Print("[GodMode:Vehicle] Prefab unavailable: " + prefab + " — trying fallback", LogLevel.WARNING);
+            string fbType = GetVehicleFallbackType(vehicleType);
+            ResourceName fallback = ResolveVehiclePrefab(fbType);
+            if (fallback == "") fallback = GetVehicleFallback(vehicleType);
+            if (fallback != "")
+            {
+                res = Resource.Load(fallback);
+                vehicleType = fbType;
+            }
+            if (!res || !res.IsValid())
+            {
+                Print("[GodMode:Vehicle] Fallback also failed", LogLevel.ERROR);
+                return "";
+            }
+        }
+
+        // Check if position is underwater — find dry land if so
+        float checkY = GetGame().GetWorld().GetSurfaceY(position[0], position[2]);
+        if (checkY < 1.0)
+        {
+            Print("[GodMode:Vehicle] Position is underwater (Y=" + checkY + ") — searching for land", LogLevel.WARNING);
+            // Search in 8 directions for dry land
+            float searchRadius = 200;
+            for (int attempt = 0; attempt < 16; attempt++)
+            {
+                float angle = attempt * 22.5 * Math.DEG2RAD;
+                float dist = searchRadius + (attempt * 50);
+                vector tryPos = position;
+                tryPos[0] = tryPos[0] + Math.Cos(angle) * dist;
+                tryPos[2] = tryPos[2] + Math.Sin(angle) * dist;
+                float tryY = GetGame().GetWorld().GetSurfaceY(tryPos[0], tryPos[2]);
+                if (tryY >= 1.0)
+                {
+                    Print("[GodMode:Vehicle] Found land at " + tryPos.ToString(false) + " (Y=" + tryY + ")");
+                    position = tryPos;
+                    checkY = tryY;
+                    break;
+                }
+            }
         }
 
         EntitySpawnParams params = new EntitySpawnParams();
@@ -41,7 +182,7 @@ class GM_VehicleManager
         params.Transform[3] = position;
 
         // Snap to terrain
-        float terrainY = GetGame().GetWorld().GetSurfaceY(position[0], position[2]);
+        float terrainY = checkY;
         params.Transform[3][1] = terrainY + 0.1; // slight offset to prevent clipping
 
         IEntity vehicle = GetGame().SpawnEntityPrefab(res, GetGame().GetWorld(), params);
@@ -87,7 +228,7 @@ class GM_VehicleManager
             return vid;
         }
 
-        foreach (BaseCompartmentSlot slot : compartments)
+        for (int i = 0; i < compartments.Count(); i++)
         {
             EntitySpawnParams crewParams = new EntitySpawnParams();
             crewParams.TransformMode = ETransformMode.WORLD;
@@ -100,7 +241,7 @@ class GM_VehicleManager
                 SCR_CompartmentAccessComponent.Cast(
                     crewMember.FindComponent(SCR_CompartmentAccessComponent));
             if (access)
-                access.MoveInVehicle(vehicle, slot);
+                access.MoveInVehicle(vehicle, i);
         }
 
         Print("[GodMode:Vehicle] Crewed " + vid + " with " + crewFaction + " (" + compartments.Count() + " slots)");
@@ -147,7 +288,12 @@ class GM_VehicleManager
                 SCR_CompartmentAccessComponent.Cast(
                     occupant.FindComponent(SCR_CompartmentAccessComponent));
             if (access)
-                access.MoveOutVehicle(-1, vector.Zero);
+            {
+                // TODO: MoveOutVehicle does not exist on SCR_CompartmentAccessComponent.
+                // Investigate correct API for ejecting occupants (e.g. CompartmentAccessComponent or direct deletion).
+                Print("[GodMode:Vehicle] MoveOutVehicle not available; deleting occupant directly.", LogLevel.WARNING);
+                SCR_EntityHelper.DeleteEntityAndChildren(occupant);
+            }
         }
     }
 
@@ -238,7 +384,7 @@ class GM_VehicleManager
         params.Transform[3] = destination;
         params.Transform[3][1] = GetGame().GetWorld().GetSurfaceY(destination[0], destination[2]);
 
-        Resource wpRes = Resource.Load("{22A875E30470BD4F}Prefabs/AI/Waypoints/AIWaypoint_Move.et");
+        Resource wpRes = Resource.Load("{750A8D1695BD6998}Prefabs/AI/Waypoints/AIWaypoint_Move.et");
         if (!wpRes || !wpRes.IsValid()) return;
 
         IEntity wpEnt = GetGame().SpawnEntityPrefab(wpRes, GetGame().GetWorld(), params);
@@ -262,7 +408,7 @@ class GM_VehicleManager
         params.Transform[3] = position;
         params.Transform[3][1] = GetGame().GetWorld().GetSurfaceY(position[0], position[2]);
 
-        Resource wpRes = Resource.Load("{B3E7B883E4D9E678}Prefabs/AI/Waypoints/AIWaypoint_Defend.et");
+        Resource wpRes = Resource.Load("{93291E72AC23930F}Prefabs/AI/Waypoints/AIWaypoint_Defend.et");
         if (!wpRes || !wpRes.IsValid()) return;
 
         IEntity wpEnt = GetGame().SpawnEntityPrefab(wpRes, GetGame().GetWorld(), params);
@@ -283,7 +429,7 @@ class GM_VehicleManager
     }
 
     // Spawn a convoy of vehicles in formation
-    void SpawnConvoy(string convoyId, ref array<string> vehicleTypes, vector startPos,
+    void SpawnConvoy(string convoyId, array<string> vehicleTypes, vector startPos,
                       vector destination, float spacing)
     {
         if (spacing <= 0) spacing = 75;
@@ -320,13 +466,40 @@ class GM_VehicleManager
     // Workbench Resource Browser for your game version. Right-click any
     // prefab → "Copy Resource Path" to get the exact GUID path.
 
-    protected ResourceName GetVehiclePrefab(string type)
+    protected ResourceName GetVehicleFallback(string vehicleType)
     {
-        // Normalize: lowercase and strip whitespace for resilient LLM output matching
-        type = type.Trim();
-        type = type.ToLower();
+        // Map failed vehicle prefabs to known-working alternatives
+        // Heavy armor (T-72, BMP) → BTR-70 (known working APC)
+        if (vehicleType == "t72" || vehicleType == "t72a" || vehicleType == "tank" ||
+            vehicleType == "bmp1" || vehicleType == "bmp" || vehicleType == "ifv")
+            return "{C012BB3488BEA0C2}Prefabs/Vehicles/Wheeled/BTR70/BTR70.et";
 
-        switch (type)
+        // Light vehicles (UAZ DShK) → plain UAZ
+        if (vehicleType == "uaz469_mg" || vehicleType == "uaz_mg" || vehicleType == "uaz_dshk")
+            return "{259EE7B78C51B624}Prefabs/Vehicles/Wheeled/UAZ469/UAZ469.et";
+
+        // Default fallback: BTR-70
+        return "{C012BB3488BEA0C2}Prefabs/Vehicles/Wheeled/BTR70/BTR70.et";
+    }
+
+    protected string GetVehicleFallbackType(string vehicleType)
+    {
+        if (vehicleType == "uaz469_mg" || vehicleType == "uaz_mg" || vehicleType == "uaz_dshk")
+            return "uaz469";
+        // BLUFOR vehicles with broken/missing prefabs fall back to m151_jeep, not btr70
+        if (vehicleType == "m998_humvee" || vehicleType == "m998_humvee_mg" ||
+            vehicleType == "humvee" || vehicleType == "m998" || vehicleType == "m998_mg")
+            return "m151_jeep";
+        return "btr70";
+    }
+
+    protected ResourceName GetVehiclePrefab(string inputType)
+    {
+        // Note: Enforce Script has no string.Trim() or string.ToLower()
+        // LLM must send clean lowercase identifiers
+        string vehType = inputType;
+
+        switch (vehType)
         {
             // ── US Vehicles ──
             case "m998_humvee":
@@ -349,7 +522,7 @@ class GM_VehicleManager
             // ── USSR Vehicles ──
             case "uaz469":
             case "uaz":
-                return "{2B43AF0BE6F3ACED}Prefabs/Vehicles/Wheeled/UAZ469/UAZ469.et";
+                return "{259EE7B78C51B624}Prefabs/Vehicles/Wheeled/UAZ469/UAZ469.et";
             case "uaz469_mg":
             case "uaz_mg":
             case "uaz_dshk":
@@ -357,7 +530,7 @@ class GM_VehicleManager
             case "btr70":
             case "btr":
             case "apc":
-                return "{1B7E1C1DE3B96050}Prefabs/Vehicles/Wheeled/BTR70/BTR70.et";
+                return "{C012BB3488BEA0C2}Prefabs/Vehicles/Wheeled/BTR70/BTR70.et";
             case "ural_truck":
             case "ural":
             case "ussr_truck":
@@ -383,82 +556,72 @@ class GM_VehicleManager
             // ── USSR Extended ──
             case "brdm2":
             case "brdm":
-                return "{1B7E1C1DE3B96050}Prefabs/Vehicles/Wheeled/BTR70/BTR70.et"; // placeholder — verify GUID
             case "brdm2_atgm":
-                return "{1B7E1C1DE3B96050}Prefabs/Vehicles/Wheeled/BTR70/BTR70.et"; // placeholder — verify GUID
             case "ural_ammo":
             case "ammo_truck":
-                return "{A6A4292F62F8C82C}Prefabs/Vehicles/Wheeled/Ural4320/Ural4320.et"; // placeholder
             case "ural_fuel":
             case "fuel_truck":
-                return "{A6A4292F62F8C82C}Prefabs/Vehicles/Wheeled/Ural4320/Ural4320.et"; // placeholder
             case "ural_medical":
             case "medical_truck":
-                return "{A6A4292F62F8C82C}Prefabs/Vehicles/Wheeled/Ural4320/Ural4320.et"; // placeholder
             case "zsu_23_4":
             case "zsu":
             case "shilka":
-                return "{25DFE68DAE77A9AF}Prefabs/Vehicles/Tracked/BMP1/BMP1.et"; // placeholder — verify GUID
             case "mt_lb":
             case "mtlb":
-                return "{25DFE68DAE77A9AF}Prefabs/Vehicles/Tracked/BMP1/BMP1.et"; // placeholder — verify GUID
-
-            // ── US Extended ──
             case "m113":
-                return "{5D63BFCD0CF5171D}Prefabs/Vehicles/Wheeled/M998/M998_MERDC.et"; // placeholder — verify GUID
             case "m60a3":
             case "m60":
-                return "{5D63BFCD0CF5171D}Prefabs/Vehicles/Wheeled/M998/M998_MERDC.et"; // placeholder — verify GUID
             case "m923_ammo":
             case "us_ammo_truck":
-                return "{3A3B42B17D4CDFE2}Prefabs/Vehicles/Wheeled/M35A2/M35A2.et"; // placeholder
             case "m923_fuel":
             case "us_fuel_truck":
-                return "{3A3B42B17D4CDFE2}Prefabs/Vehicles/Wheeled/M35A2/M35A2.et"; // placeholder
-
-            // ── Extended Helicopters ──
             case "mi8":
             case "hip":
-                return "{E1C9450B2E9A1E38}Prefabs/Vehicles/Helicopters/UH1H/UH1H.et"; // placeholder — verify GUID
             case "mi24":
             case "hind":
-                return "{E1C9450B2E9A1E38}Prefabs/Vehicles/Helicopters/UH1H/UH1H.et"; // placeholder — verify GUID
             case "ah1":
             case "cobra":
-                return "{E1C9450B2E9A1E38}Prefabs/Vehicles/Helicopters/UH1H/UH1H.et"; // placeholder — verify GUID
-
-            // ── Static Weapons ──
             case "dshk_tripod":
             case "dshk":
-                return "{2B43AF0BE6F3ACED}Prefabs/Vehicles/Wheeled/UAZ469/UAZ469.et"; // placeholder — verify GUID
             case "spg9_tripod":
             case "spg9":
-                return "{2B43AF0BE6F3ACED}Prefabs/Vehicles/Wheeled/UAZ469/UAZ469.et"; // placeholder — verify GUID
             case "ags17_tripod":
             case "ags17":
-                return "{2B43AF0BE6F3ACED}Prefabs/Vehicles/Wheeled/UAZ469/UAZ469.et"; // placeholder — verify GUID
             case "m2_tripod":
-                return "{EF93C920FF4B2ED5}Prefabs/Vehicles/Wheeled/M151A2/M151A2.et"; // placeholder — verify GUID
             case "tow_launcher":
             case "tow":
-                return "{EF93C920FF4B2ED5}Prefabs/Vehicles/Wheeled/M151A2/M151A2.et"; // placeholder — verify GUID
+                Print("[GodMode:Vehicle] Unsupported vehicle type: '" + vehType + "' — no verified prefab is configured for this alias", LogLevel.WARNING);
+                return "";
 
             default:
-                Print("[GodMode:Vehicle] Unknown vehicle type: '" + type + "', falling back to UAZ469", LogLevel.WARNING);
-                return "{2B43AF0BE6F3ACED}Prefabs/Vehicles/Wheeled/UAZ469/UAZ469.et";
+                Print("[GodMode:Vehicle] Unknown vehicle type: '" + vehType + "'", LogLevel.WARNING);
+                return "";
         }
+
+        return "";
     }
 
     protected ResourceName GetCrewPrefab(string faction)
     {
+        // Try catalog-discovered character prefabs first
+        EnsureCatalog();
+        ResourceName found;
+        if (faction == "us" && m_mCatalogVehicles.Find("_crew_us", found))
+            return found;
+        if (m_mCatalogVehicles.Find("_crew_ussr", found))
+            return found;
+
+        // Hardcoded fallback
         switch (faction)
         {
             case "us":
                 return "{1F5DE3BA6034D382}Prefabs/Characters/Factions/BLUFOR/US_Army/Character_US_Rifleman.et";
             case "ussr":
-                return "{2DD7C5DD855FF20A}Prefabs/Characters/Factions/OPFOR/USSR_Army/Character_USSR_Rifleman.et";
+                return "{DCB41B3746FDD1BE}Prefabs/Characters/Factions/OPFOR/USSR_Army/Character_USSR_Rifleman.et";
             default:
-                return "{2DD7C5DD855FF20A}Prefabs/Characters/Factions/OPFOR/USSR_Army/Character_USSR_Rifleman.et";
+                return "{DCB41B3746FDD1BE}Prefabs/Characters/Factions/OPFOR/USSR_Army/Character_USSR_Rifleman.et";
         }
+
+        return "";
     }
 }

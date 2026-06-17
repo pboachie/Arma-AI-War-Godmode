@@ -59,33 +59,17 @@
       "us_fire_team",
       "us_mg_team",
       "us_at_team",
-      "us_sniper_team",
-      "us_recon_team",
-      "us_mortar_team",
-      "us_engineer_squad",
-      "us_hq_element",
-      "us_medic_team",
-      "us_fist_team"
+      "us_sniper_team"
     ],
     "ussr": [
       "ussr_rifle_squad",
       "ussr_fire_team",
       "ussr_mg_team",
       "ussr_at_team",
-      "ussr_sniper_team",
-      "ussr_recon_team",
-      "ussr_mortar_team",
-      "ussr_engineer_squad",
-      "ussr_hq_element",
-      "ussr_medic_team",
-      "ussr_rpg_team"
+      "ussr_sniper_team"
     ],
     "fia": [
-      "fia_squad",
-      "fia_recon_cell",
-      "fia_sapper_cell",
-      "fia_mortar_crew",
-      "fia_technical"
+      "fia_squad"
     ]
   },
   "vehicle_types": {
@@ -94,11 +78,7 @@
       "m998_humvee_mg",
       "m151_jeep",
       "m35_truck",
-      "m113",
-      "m60a3",
-      "m923_ammo",
-      "m923_fuel",
-      "m577_command"
+      "uh1h"
     ],
     "ussr": [
       "uaz469",
@@ -106,28 +86,12 @@
       "btr70",
       "ural_truck",
       "bmp1",
-      "t72",
-      "brdm2",
-      "brdm2_atgm",
-      "ural_ammo",
-      "ural_fuel",
-      "ural_medical",
-      "zsu_23_4",
-      "mt_lb"
+      "t72"
     ],
     "helicopters": [
-      "uh1h",
-      "mi8",
-      "mi24",
-      "ah1"
+      "uh1h"
     ],
-    "static_weapons": [
-      "dshk_tripod",
-      "spg9_tripod",
-      "ags17_tripod",
-      "m2_tripod",
-      "tow_launcher"
-    ]
+    "static_weapons": []
   },
   "faction_profiles": {
     "ussr": {
@@ -367,5 +331,161 @@
     "port": 17777,
     "expose_player_list": true,
     "expose_mod_list": true
+  },
+  "llm": {
+    "provider": "glm",
+    "model": "glm-4.7",
+    "max_tokens": 128000,
+    "temperature": 0.8,
+    "max_history": 100,
+    "fallback_provider": "",
+    "fallback_model": "",
+    "max_concurrent_calls": 10,
+    "circuit_breaker_threshold": 3,
+    "circuit_breaker_cooldown_seconds": 60,
+    "compaction_threshold_messages": 30,
+    "compaction_keep_recent": 6
+  },
+  "rate_limiting": {
+    "manual_commands_per_second": 2,
+    "manual_commands_burst": 10,
+    "sitrep_min_interval_seconds": 5
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "structured",
+    "log_sitrep_payloads": false,
+    "log_llm_responses": false,
+    "max_command_log_entries": 200
+  },
+  "replay": {
+    "enabled": true,
+    "directory": "replays",
+    "compress": true,
+    "max_file_size_mb": 50
+  },
+  "performance": {
+    "response_time_warning_ms": 5000,
+    "response_time_critical_ms": 15000,
+    "max_response_time_samples": 100,
+    "empty_response_alert_threshold_pct": 10
+  },
+  "adaptive_difficulty": {
+    "enabled": true,
+    "ema_alpha": 0.1,
+    "min_modifier": 0.4,
+    "max_modifier": 2.0,
+    "kill_ratio_increase_threshold": 2.0,
+    "kill_ratio_decrease_threshold": 0.5,
+    "modifier_step": 0.2
+  },
+  "cleanup": {
+    "body_cleanup_delay_seconds": 180,
+    "wreck_cleanup_delay_seconds": 300,
+    "player_safe_radius_meters": 100,
+    "max_dead_bodies": 30,
+    "auto_cleanup_enabled": true,
+    "cleanup_check_interval_seconds": 60
+  },
+  "dashboard": {
+    "poll_interval_ms": 3000,
+    "max_events_displayed": 50,
+    "max_commands_displayed": 200,
+    "map_default_zoom": 1.0,
+    "map_size": 8192
+  },
+  "agents": {
+    "enabled": true,
+    "agents_list": [
+      {
+        "name": "intelligence",
+        "role": "Player behavior analysis, movement corridors, engagement patterns",
+        "type": "code",
+        "phase": "pre_process",
+        "enabled": true
+      },
+      {
+        "name": "threat_assessment",
+        "role": "Threat scoring, engagement probability, safe route planning",
+        "type": "code",
+        "phase": "pre_process",
+        "enabled": true
+      },
+      {
+        "name": "difficulty",
+        "role": "Dynamic difficulty assessment and command recommendations",
+        "type": "code",
+        "phase": "pre_process",
+        "enabled": true
+      },
+      {
+        "name": "force_preservation",
+        "role": "Unit health monitoring, retreat/merge decisions, morale tracking",
+        "type": "code",
+        "phase": "pre_process",
+        "enabled": true
+      },
+      {
+        "name": "environment",
+        "role": "Weather/time recommendations, mood setting",
+        "type": "code",
+        "phase": "pre_process",
+        "enabled": true
+      },
+      {
+        "name": "logistics",
+        "role": "Reinforcement needs, spawn priorities, composition optimization",
+        "type": "code",
+        "phase": "pre_process",
+        "enabled": true
+      },
+      {
+        "name": "strategic_commander",
+        "role": "High-level strategy, phase management, force allocation",
+        "type": "llm",
+        "phase": "decision",
+        "enabled": true
+      },
+      {
+        "name": "tactical_planner",
+        "role": "Unit-level command generation, coordinated maneuvers",
+        "type": "llm",
+        "phase": "decision",
+        "enabled": true
+      },
+      {
+        "name": "narrative_director",
+        "role": "Radio comms, atmosphere, immersion, pacing",
+        "type": "llm",
+        "phase": "decision",
+        "enabled": true
+      },
+      {
+        "name": "learning_engine",
+        "role": "Pattern recognition, lesson generation, cross-session adaptation",
+        "type": "code",
+        "phase": "post_process",
+        "enabled": true
+      }
+    ],
+    "max_lessons_per_turn": 5,
+    "max_total_lessons": 10,
+    "learning_categories": [
+      "spatial_patterns",
+      "timing_patterns",
+      "tactic_correlations",
+      "environmental_exploitation",
+      "player_adaptation",
+      "force_composition",
+      "engagement_range",
+      "position_value",
+      "reinforcement_timing",
+      "command_diversity",
+      "kill_zone_analysis",
+      "retreat_effectiveness",
+      "coordination_patterns",
+      "difficulty_adaptation",
+      "attrition_rate"
+    ]
   }
 }

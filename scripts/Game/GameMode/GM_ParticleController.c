@@ -31,7 +31,7 @@ class GM_ParticleController
                 lifetime = 10.0;
         }
 
-        IEntity ent = SpawnParticleEffect(ptcPrefab, position, lifetime);
+        IEntity ent = SpawnEffect(ptcPrefab, position, lifetime);
         if (ent)
             Print("[GodMode:Particle] Explosion (" + size + ") at " + position.ToString(false));
     }
@@ -59,7 +59,7 @@ class GM_ParticleController
                 smokePrefab = "{1A2B3C4D5E6F7890}Prefabs/Weapons/Grenades/SmokeEffect_White.et";
         }
 
-        IEntity ent = SpawnParticleEffect(smokePrefab, position, 60.0);
+        IEntity ent = SpawnEffect(smokePrefab, position, 60.0);
         if (ent)
             Print("[GodMode:Particle] Smoke (" + color + ") at " + position.ToString(false));
     }
@@ -70,11 +70,12 @@ class GM_ParticleController
 
     void SpawnFlare(vector position)
     {
-        // Spawn above the target area
-        position[1] += 200; // 200m altitude
+        // Spawn above the target area — Enforce Script doesn't support array[i] += val
+        float flareAlt = position[1] + 200; // 200m altitude
+        position[1] = flareAlt;
 
         ResourceName flarePrefab = "{5A6B7C8D9E0F1234}Prefabs/Weapons/Projectiles/Flare_Illum.et";
-        IEntity ent = SpawnParticleEffect(flarePrefab, position, 45.0);
+        IEntity ent = SpawnEffect(flarePrefab, position, 45.0);
         if (ent)
             Print("[GodMode:Particle] Flare at " + position.ToString(false));
     }
@@ -83,7 +84,7 @@ class GM_ParticleController
     // Generic Particle Spawner
     // ═══════════════════════════════════════════════
 
-    protected IEntity SpawnParticleEffect(ResourceName prefab, vector position, float lifetimeSeconds = 30.0)
+    protected IEntity SpawnEffect(ResourceName prefab, vector position, float lifetimeSeconds = 30.0)
     {
         Resource res = Resource.Load(prefab);
         if (!res || !res.IsValid())
@@ -117,19 +118,16 @@ class GM_ParticleController
 
     void SpawnParticleFromPTC(ResourceName ptcPath, vector position, float lifetimeSeconds = 30.0)
     {
-        ParticleEffectEntityParams ptcParams = new ParticleEffectEntityParams();
-        ptcParams.TransformMode = ETransformMode.WORLD;
-        ptcParams.Transform[3] = position;
-        ptcParams.UseFrameEvent = false;
-        ptcParams.PivotID = -1;
-        ptcParams.EffectPath = ptcPath;
-
-        ParticleEffectEntity ptcEntity = ParticleEffectEntity.SpawnParticleEffect(ptcPath, ptcParams);
+        ParticleEffectEntitySpawnParams spawnParams();
+        spawnParams.Transform[3] = position;
+        ParticleEffectEntity ptcEntity = ParticleEffectEntity.SpawnParticleEffect(ptcPath, spawnParams);
         if (!ptcEntity)
         {
             Print("[GodMode:Particle] Failed to spawn PTC: " + ptcPath, LogLevel.WARNING);
             return;
         }
+
+        Print("[GodMode:Particle] Spawned PTC at " + position.ToString(false));
 
         GetGame().GetCallqueue().CallLater(
             SCR_EntityHelper.DeleteEntityAndChildren,

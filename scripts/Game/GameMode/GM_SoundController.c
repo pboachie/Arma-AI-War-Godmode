@@ -10,17 +10,11 @@ class GM_SoundController
     void PlayThunderNear(vector position)
     {
         // Offset for realism — thunder doesn't strike at exact coordinates
-        position[0] += Math.RandomFloat(-200, 200);
-        position[2] += Math.RandomFloat(-200, 200);
+        float px = position[0] + Math.RandomFloat(-200, 200);
+        float pz = position[2] + Math.RandomFloat(-200, 200);
+        position = Vector(px, position[1], pz);
 
-        SCR_SoundManagerEntity soundMgr = GetGame().GetSoundManagerEntity();
-        if (!soundMgr)
-        {
-            Print("[GodMode:Sound] SoundManager unavailable", LogLevel.WARNING);
-            return;
-        }
-
-        soundMgr.CreateAndPlayAudioSource(position, "SOUND_ENVIRONMENT_THUNDER");
+        // TODO: Hook into actual sound playback when AudioSystem API is available
         Print("[GodMode:Sound] Thunder at " + position.ToString(false));
     }
 
@@ -32,14 +26,7 @@ class GM_SoundController
     {
         if (soundEventName == "") return;
 
-        SCR_SoundManagerEntity soundMgr = GetGame().GetSoundManagerEntity();
-        if (!soundMgr)
-        {
-            Print("[GodMode:Sound] SoundManager unavailable", LogLevel.WARNING);
-            return;
-        }
-
-        soundMgr.CreateAndPlayAudioSource(position, soundEventName);
+        // TODO: Hook into actual sound playback when AudioSystem API is available
         Print("[GodMode:Sound] Playing '" + soundEventName + "' at " + position.ToString(false));
     }
 

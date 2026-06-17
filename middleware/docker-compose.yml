@@ -1,16 +1,95 @@
 services:
-  godmode-server:
-    build: .
+  godmode:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.combined
+    container_name: godmode
     ports:
-      - "8000:8000"
-    env_file:
-      - .env
+      - "${ARMA_GAME_PORT:-2001}:2001/udp"
+      - "${ARMA_A2S_PORT:-17777}:17777/udp"
+      - "${ARMA_RCON_PORT:-19999}:19999/udp"
+      - "${GODMODE_PORT:-8080}:8000"
+    environment:
+      # ── Arma Server ──
+      - CONFIG=${CONFIG:-config}
+      - MAX_FPS=${MAX_FPS:-60}
+      - MAX_RESTARTS=${MAX_RESTARTS:-0}
+      - FREEZE_CHECK=${FREEZE_CHECK:-300}
+      - USE_EXPERIMENTAL=${USE_EXPERIMENTAL:-false}
+      - STARTUP_PARAMETERS=${STARTUP_PARAMETERS:-}
+      - STEAM_USER=${STEAM_USER:-}
+      - STEAM_PASS=${STEAM_PASS:-}
+      - ARMA_LOCAL_ADDON_ENABLED=${ARMA_LOCAL_ADDON_ENABLED:-true}
+      - ARMA_LOCAL_ADDON_NAME=${ARMA_LOCAL_ADDON_NAME:-AIWar}
+      - ARMA_LOCAL_ADDON_ID=${ARMA_LOCAL_ADDON_ID:-68EB7BF2F5940DD9}
+      # ── LLM Provider ──
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GLM_API_KEY=${GLM_API_KEY:-}
+      - GLM_BASE_URL=${GLM_BASE_URL:-https://api.z.ai/api/coding/paas/v4/}
+      - GLM_TEMPERATURE=${GLM_TEMPERATURE:-0.8}
+      - LLM_PROVIDER=${LLM_PROVIDER:-glm}
+      - LLM_MODEL=${LLM_MODEL:-glm-4.7}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-32000}
+      - MAX_HISTORY=${MAX_HISTORY:-100}
+      - MAX_CONCURRENT_LLM=${MAX_CONCURRENT_LLM:-10}
+      - MAX_MEMORY_MESSAGES=${MAX_MEMORY_MESSAGES:-100}
+      - MEMORY_TOKEN_LIMIT=${MEMORY_TOKEN_LIMIT:-128000}
+      - COMPACTION_THRESHOLD=${COMPACTION_THRESHOLD:-100}
+      - FALLBACK_PROVIDER=${FALLBACK_PROVIDER:-}
+      - FALLBACK_MODEL=${FALLBACK_MODEL:-}
+      # ── Connection (localhost — same container) ──
+      - ARMA_RCON_CONNECT_ADDRESS=127.0.0.1
+      - ARMA_A2S_CONNECT_ADDRESS=127.0.0.1
+      - ARMA_RCON_PORT=19999
+      - ARMA_RCON_PASSWORD=${ARMA_RCON_PASSWORD:-}
+      - ARMA_A2S_PORT=17777
+      # ── Process mode (detect game server via pgrep, not Docker CLI) ──
+      - GODMODE_PROCESS_MODE=true
     volumes:
-      - ./battle_history:/app/battle_history
-      - ./replays:/app/replays
+      # Arma server configs
+      - type: bind
+        source: "../Arma Reforger Server/configs"
+        target: /home/reforger/configs
+      # Local addon sources (read-only)
+      - type: bind
+        source: ${ARMA_LOCAL_SCRIPTS_SOURCE:-../scripts/Game}
+        target: /mnt/godmode-source/scripts/Game
+        read_only: true
+      - type: bind
+        source: ${ARMA_LOCAL_CONFIGS_SOURCE:-../Configs}
+        target: /mnt/godmode-source/Configs
+        read_only: true
+      # Persistent named volumes
+      - arma-steamcmd:/home/reforger/steamcmd
+      - arma-steam:/home/reforger/Steam
+      - arma-install:/home/reforger/reforger_bins
+      - arma-profile:/home/reforger/profile
+      - arma-workshop:/home/reforger/workshop
+      - godmode-replays:/app/replays
+      - godmode-battles:/app/battle_summaries
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 60s
+      test: ["CMD", "curl", "-f", "--max-time", "5", "http://localhost:8000/health"]
+      interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 300s
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  arma-steamcmd:
+  arma-steam:
+  arma-install:
+  arma-profile:
+  arma-workshop:
+  godmode-replays:
+  godmode-battles:

@@ -1,8 +1,10 @@
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
+hypercorn>=0.17.0
 anthropic>=0.40.0
 openai>=1.50.0
 pydantic>=2.5.0
+python-dotenv>=1.0.0
 requests>=2.31.0
 
 # ── LangChain (memory, chains, structured output, fallbacks) ──
@@ -10,3 +12,6 @@ langchain>=0.3.0
 langchain-core>=0.3.0
 langchain-openai>=0.3.0
 langchain-anthropic>=0.3.0
+
+# ── A2S server query protocol ──
+python-a2s>=1.3.0

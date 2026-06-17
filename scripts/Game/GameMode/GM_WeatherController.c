@@ -8,20 +8,43 @@ class GM_WeatherController
     protected float m_fWindSpeed = 0;
     protected float m_fWindDirection = 0;
     protected bool m_bWindOverrideActive = false;
+    protected bool m_bMissingManagerWarned = false;
 
     // ═══════════════════════════════════════════════
     // Manager Access (safe, null-checked)
     // ═══════════════════════════════════════════════
 
-    protected TimeAndWeatherManagerEntity GetManager()
+    protected TimeAndWeatherManagerEntity GetManager(bool warnIfMissing = true)
     {
         ChimeraWorld world = ChimeraWorld.CastFrom(GetGame().GetWorld());
         if (!world)
         {
-            Print("[GodMode:Weather] ChimeraWorld not available", LogLevel.WARNING);
+            if (warnIfMissing && !m_bMissingManagerWarned)
+            {
+                Print("[GodMode:Weather] ChimeraWorld not available yet; weather controls are disabled for now", LogLevel.WARNING);
+                m_bMissingManagerWarned = true;
+            }
             return null;
         }
-        return world.GetTimeAndWeatherManager();
+
+        TimeAndWeatherManagerEntity mgr = world.GetTimeAndWeatherManager();
+        if (!mgr)
+        {
+            if (warnIfMissing && !m_bMissingManagerWarned)
+            {
+                Print("[GodMode:Weather] TimeAndWeatherManagerEntity not present in this world; set_weather/set_time/set_wind will be skipped", LogLevel.WARNING);
+                m_bMissingManagerWarned = true;
+            }
+            return null;
+        }
+
+        m_bMissingManagerWarned = false;
+        return mgr;
+    }
+
+    bool HasManager()
+    {
+        return GetManager(false) != null;
     }
 
     // ═══════════════════════════════════════════════
@@ -41,12 +64,13 @@ class GM_WeatherController
     {
         TimeAndWeatherManagerEntity mgr = GetManager();
         if (!mgr)
-        {
-            Print("[GodMode:Weather] Manager unavailable, cannot set weather", LogLevel.ERROR);
             return;
-        }
 
-        // Validate weather ID
+        // Normalize LLM weather names to Enfusion IDs (e.g. "overcast" → "Overcast", "heavy_rain" → "Rainy")
+        string normalized = NormalizeWeatherID(weatherID);
+        if (normalized != "")
+            weatherID = normalized;
+
         if (!IsValidWeatherID(weatherID))
         {
             Print("[GodMode:Weather] Invalid weather ID: " + weatherID, LogLevel.WARNING);
@@ -64,6 +88,25 @@ class GM_WeatherController
               " (transition: " + transitionSeconds + "s" +
               ", duration: " + durationSeconds + "s" +
               ", loop: " + looping + ")");
+    }
+
+    // Normalize LLM weather strings to Enfusion's expected case-sensitive IDs
+    protected string NormalizeWeatherID(string id)
+    {
+        string lower = id;
+        lower.ToLower();
+
+        if (lower == "clear" || lower == "sunny")          return "Clear";
+        if (lower == "cloudy" || lower == "clouds")        return "Cloudy";
+        if (lower == "overcast")                           return "Overcast";
+        if (lower == "rainy" || lower == "rain" ||
+            lower == "light_rain" || lower == "heavy_rain") return "Rainy";
+        if (lower == "storm" || lower == "thunderstorm" ||
+            lower == "heavy_storm")                        return "Storm";
+        if (lower == "foggy" || lower == "fog" ||
+            lower == "mist" || lower == "haze")            return "Foggy";
+
+        return "";  // unrecognized
     }
 
     protected bool IsValidWeatherID(string id)
@@ -153,10 +196,7 @@ class GM_WeatherController
     {
         TimeAndWeatherManagerEntity mgr = GetManager();
         if (!mgr)
-        {
-            Print("[GodMode:Weather] Manager unavailable, cannot set time", LogLevel.ERROR);
             return;
-        }
 
         // Clamp to valid range
         hours24 = Math.Clamp(hours24, 0.0, 23.99);
@@ -222,7 +262,7 @@ class GM_WeatherController
         // Format: "speed,direction_degrees"
         // e.g., "8.5,270" = 8.5 m/s from the west
         array<string> parts = {};
-        params.Split(",", parts);
+        params.Split(",", parts, false);
         if (parts.Count() < 2)
         {
             Print("[GodMode:Weather] Invalid wind params: " + params, LogLevel.WARNING);
@@ -309,8 +349,10 @@ class GM_WeatherController
         }
         else if (fromIdx >= 0 && toIdx >= 0)
         {
-            int step = (toIdx > fromIdx) ? 1 : -1;
-            for (int i = fromIdx + step; ; i += step)
+            int step = -1;
+            if (toIdx > fromIdx)
+                step = 1;
+            for (int i = fromIdx + step; i >= 0 && i < SEVERITY_ORDER.Count(); i += step)
             {
                 m_aWeatherQueue.Insert(SEVERITY_ORDER[i]);
                 if (i == toIdx) break;
@@ -405,6 +447,7 @@ class GM_WeatherController
             case "Foggy":  return "low";
             default:       return "none";
         }
+        return "none";
     }
 
     string GetSniperEffectiveness()

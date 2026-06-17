@@ -1144,10 +1144,10 @@ class ScalingEngine:
         # 6. Compute effective limits
         # Base formula: max_squads = base + per_player * count * spread_mod * diff_mod
         base_cfg = self.config.get("player_scaling_v2", {}).get("base_formula", {})
-        base_squads = base_cfg.get("base_squads", 6)
-        per_player_sq = base_cfg.get("per_player_squads", 4.5)
-        base_vehicles = base_cfg.get("base_vehicles", 3)
-        per_player_veh = base_cfg.get("per_player_vehicles", 1.8)
+        base_squads = base_cfg.get("base_squads", 15)
+        per_player_sq = base_cfg.get("per_player_squads", 10)
+        base_vehicles = base_cfg.get("base_vehicles", 6)
+        per_player_veh = base_cfg.get("per_player_vehicles", 4)
         base_interval = base_cfg.get("base_update_interval", 25)
         per_player_interval = base_cfg.get("per_player_interval_add", 2.5)
         max_interval = base_cfg.get("max_update_interval", 90)
@@ -1219,3 +1219,618 @@ class ScalingEngine:
             "pool_stats": self.entity_pool.get_stats(),
             "simulation_cost": round(self.lod_manager.get_simulation_cost_estimate(), 1),
         }
+
+
+# ═══════════════════════════════════════════════════════════
+# 9. ADAPTIVE DIFFICULTY CONTROLLER
+# ═══════════════════════════════════════════════════════════
+
+class DifficultyTier(Enum):
+    """Discrete difficulty tiers that map to concrete AI behavior parameters."""
+    MERCY = "mercy"           # Players getting destroyed, AI becomes very weak
+    EASY = "easy"             # AI is clearly winning, significant nerfs
+    REDUCED = "reduced"       # AI is ahead, moderate nerfs
+    BALANCED = "balanced"     # Even match
+    ELEVATED = "elevated"     # Players are ahead, AI gets a boost
+    HARD = "hard"             # Players dominating, full AI capability
+    RUTHLESS = "ruthless"     # Players stomping, AI uses everything
+
+
+@dataclass
+class DifficultyParameters:
+    """Concrete parameters that mechanically affect AI combat effectiveness.
+
+    These are NOT suggestions to the LLM -- they are hard limits enforced
+    by the middleware before commands reach the game engine.
+    """
+    accuracy_multiplier: float = 1.0       # Scales AI aim skill (0.1 = terrible, 1.0 = normal)
+    reaction_time_multiplier: float = 1.0  # Scales delay before AI engages (2.0 = 2x slower)
+    max_simultaneous_attackers: int = 99   # How many AI squads can attack at once
+    spawn_rate_multiplier: float = 1.0     # Multiplier on reinforcement spawn rate
+    max_active_squads: int = 99            # Hard cap on total AI squads
+    aggression_cap: str = "ruthless"       # Maximum allowed aggression level
+    suppress_spawn_commands: bool = False  # Block all spawn commands from LLM
+    force_retreat_pct: float = 0.0         # Force this % of squads to retreat
+    engagement_range_cap: float = 9999.0   # Max engagement distance in meters
+    heavy_vehicle_allowed: bool = True     # Allow T-72, BMP-1 spawns
+
+    def to_dict(self) -> dict:
+        return {
+            "accuracy_multiplier": round(self.accuracy_multiplier, 2),
+            "reaction_time_multiplier": round(self.reaction_time_multiplier, 2),
+            "max_simultaneous_attackers": self.max_simultaneous_attackers,
+            "spawn_rate_multiplier": round(self.spawn_rate_multiplier, 2),
+            "max_active_squads": self.max_active_squads,
+            "aggression_cap": self.aggression_cap,
+            "suppress_spawn_commands": self.suppress_spawn_commands,
+            "force_retreat_pct": round(self.force_retreat_pct, 2),
+            "engagement_range_cap": round(self.engagement_range_cap, 1),
+            "heavy_vehicle_allowed": self.heavy_vehicle_allowed,
+        }
+
+
+# Tier -> concrete parameters mapping
+_DIFFICULTY_TIER_PARAMS = {
+    DifficultyTier.MERCY: DifficultyParameters(
+        accuracy_multiplier=0.15,
+        reaction_time_multiplier=3.0,
+        max_simultaneous_attackers=1,
+        spawn_rate_multiplier=0.0,
+        max_active_squads=3,
+        aggression_cap="cautious",
+        suppress_spawn_commands=True,
+        force_retreat_pct=0.15,
+        engagement_range_cap=100.0,
+        heavy_vehicle_allowed=False,
+    ),
+    DifficultyTier.EASY: DifficultyParameters(
+        accuracy_multiplier=0.3,
+        reaction_time_multiplier=2.5,
+        max_simultaneous_attackers=2,
+        spawn_rate_multiplier=0.2,
+        max_active_squads=5,
+        aggression_cap="cautious",
+        suppress_spawn_commands=False,
+        force_retreat_pct=0.1,
+        engagement_range_cap=200.0,
+        heavy_vehicle_allowed=False,
+    ),
+    DifficultyTier.REDUCED: DifficultyParameters(
+        accuracy_multiplier=0.5,
+        reaction_time_multiplier=1.8,
+        max_simultaneous_attackers=3,
+        spawn_rate_multiplier=0.5,
+        max_active_squads=8,
+        aggression_cap="balanced",
+        suppress_spawn_commands=False,
+        force_retreat_pct=0.15,
+        engagement_range_cap=400.0,
+        heavy_vehicle_allowed=True,
+    ),
+    DifficultyTier.BALANCED: DifficultyParameters(
+        accuracy_multiplier=0.7,
+        reaction_time_multiplier=1.2,
+        max_simultaneous_attackers=5,
+        spawn_rate_multiplier=1.0,
+        max_active_squads=20,
+        aggression_cap="aggressive",
+        suppress_spawn_commands=False,
+        force_retreat_pct=0.0,
+        engagement_range_cap=800.0,
+        heavy_vehicle_allowed=True,
+    ),
+    DifficultyTier.ELEVATED: DifficultyParameters(
+        accuracy_multiplier=0.85,
+        reaction_time_multiplier=1.0,
+        max_simultaneous_attackers=8,
+        spawn_rate_multiplier=1.3,
+        max_active_squads=16,
+        aggression_cap="aggressive",
+    ),
+    DifficultyTier.HARD: DifficultyParameters(
+        accuracy_multiplier=1.0,
+        reaction_time_multiplier=0.8,
+        max_simultaneous_attackers=12,
+        spawn_rate_multiplier=1.5,
+        max_active_squads=20,
+        aggression_cap="ruthless",
+    ),
+    DifficultyTier.RUTHLESS: DifficultyParameters(
+        accuracy_multiplier=1.0,
+        reaction_time_multiplier=0.6,
+        max_simultaneous_attackers=99,
+        spawn_rate_multiplier=2.0,
+        max_active_squads=25,
+        aggression_cap="ruthless",
+    ),
+}
+
+
+class DifficultyController:
+    """Adaptive difficulty system that produces MECHANICAL effects, not just labels.
+
+    Key design principles:
+      1. The difficulty modifier directly controls spawn caps, accuracy, and aggression
+         -- it is NOT just advisory text for the LLM.
+      2. Progressive scaling: the worse the imbalance, the faster the system responds.
+      3. Mercy rule: if players have 0 kills after a threshold of AI kills, emergency nerf.
+      4. Player behavior feedback: all players hiding/stationary indicates they are
+         overwhelmed, which should reduce difficulty even before kill counts reflect it.
+      5. Kill ratio uses a sliding window (not all-time totals) to respond to
+         current battle state rather than historical averages.
+    """
+
+    def __init__(self):
+        self.difficulty_modifier: float = 1.0
+        self.current_tier: DifficultyTier = DifficultyTier.BALANCED
+
+        # Sliding window for recent engagement tracking
+        self._kill_window: deque = deque(maxlen=50)  # (timestamp, "player"|"ai")
+        self._player_kills_total: int = 0
+        self._ai_kills_total: int = 0
+
+        # Mercy rule state
+        self._mercy_active: bool = False
+        self._mercy_activated_at: float = 0.0
+        self._mercy_cooldown: float = 120.0  # seconds before mercy can deactivate
+
+        # Consecutive zero-kill tracking
+        self._consecutive_ticks_zero_player_kills: int = 0
+
+        # Behavior signal tracking
+        self._all_players_passive_ticks: int = 0
+
+        self._last_update: float = time.time()
+
+    def track_engagement(self, event: str, timestamp: float = None):
+        """Record a kill event into the sliding window.
+
+        Args:
+            event: Raw event string from game state (e.g., "enemy_killed", "player_hit")
+            timestamp: Event timestamp, defaults to now
+        """
+        ts = timestamp or time.time()
+        if "enemy_killed" in event:
+            self._kill_window.append((ts, "player"))
+            self._player_kills_total += 1
+        elif "player_hit" in event or "player_killed" in event:
+            self._kill_window.append((ts, "ai"))
+            self._ai_kills_total += 1
+
+    def _get_recent_kill_ratio(self, window_seconds: float = 300.0) -> tuple:
+        """Get kill counts within a recent time window.
+
+        Returns (player_kills, ai_kills) in the window.
+        Using a time window instead of all-time totals means the system
+        responds to the CURRENT battle state, not historical averages.
+        """
+        cutoff = time.time() - window_seconds
+        player_kills = 0
+        ai_kills = 0
+        for ts, who in self._kill_window:
+            if ts >= cutoff:
+                if who == "player":
+                    player_kills += 1
+                else:
+                    ai_kills += 1
+        return player_kills, ai_kills
+
+    def _compute_imbalance_score(self, player_kills: int, ai_kills: int) -> float:
+        """Compute a signed imbalance score.
+
+        Returns a value from -1.0 (AI completely dominating) to +1.0 (players dominating).
+        0.0 = balanced.
+
+        Uses a non-linear scaling so extreme imbalances (14:0) produce much
+        stronger signals than mild ones (3:2).
+        """
+        total = player_kills + ai_kills
+        if total == 0:
+            return 0.0
+
+        # Raw ratio: 0.0 = all AI kills, 1.0 = all player kills
+        raw_ratio = player_kills / total
+
+        # Center around 0.5, scale to [-1, 1]
+        linear = (raw_ratio - 0.5) * 2.0
+
+        # Apply non-linear scaling: extreme ratios get amplified
+        # sign(x) * x^0.6 preserves sign but compresses toward extremes
+        if linear >= 0:
+            score = linear ** 0.7
+        else:
+            score = -(abs(linear) ** 0.7)
+
+        # Weight by total kills -- more data = more confidence
+        confidence = min(1.0, total / 8.0)
+        return score * confidence
+
+    def _check_mercy_rule(self, player_kills: int, ai_kills: int,
+                          player_profiles: dict,
+                          mission_time: float = 0.0) -> bool:
+        """Determine if the mercy rule should be active.
+
+        Mercy rule triggers when:
+          - Players have 0 kills AND AI has 5+ kills (recent window), OR
+          - Players have 0 kills AND AI has 10+ kills (all-time), OR
+          - All players are classified as passive/hiding for 3+ consecutive ticks
+
+        Mercy rule does NOT trigger during the first 120s of the mission
+        (warm-up period where players are still spawning/deploying).
+
+        Mercy rule deactivates when:
+          - Players get 2+ kills in the recent window AND mercy has been active
+            for at least the cooldown period
+        """
+        now = time.time()
+
+        # Warm-up grace period: don't activate mercy during the first 120s
+        # when players are still spawning, choosing loadouts, and deploying.
+        if mission_time < 120.0 and not self._mercy_active:
+            return self._mercy_active
+
+        # Check activation conditions
+        should_activate = False
+
+        if player_kills == 0 and ai_kills >= 5:
+            should_activate = True
+            log.warning("Mercy rule trigger: 0 player kills vs %d AI kills "
+                        "(recent window)", ai_kills)
+
+        if self._player_kills_total == 0 and self._ai_kills_total >= 10:
+            should_activate = True
+            log.warning("Mercy rule trigger: 0 player kills vs %d AI kills "
+                        "(all-time)", self._ai_kills_total)
+
+        if self._all_players_passive_ticks >= 10:
+            should_activate = True
+            log.warning("Mercy rule trigger: all players passive for %d "
+                        "consecutive ticks", self._all_players_passive_ticks)
+
+        if should_activate and not self._mercy_active:
+            self._mercy_active = True
+            self._mercy_activated_at = now
+            log.warning("MERCY RULE ACTIVATED — AI will be severely nerfed "
+                        "until players can recover")
+
+        # Check deactivation conditions
+        if self._mercy_active:
+            time_in_mercy = now - self._mercy_activated_at
+            if player_kills >= 2 and time_in_mercy >= self._mercy_cooldown:
+                self._mercy_active = False
+                log.info("Mercy rule deactivated — players have %d kills, "
+                         "returning to normal difficulty", player_kills)
+
+        return self._mercy_active
+
+    def _analyze_player_behavior_signals(self, player_profiles: dict) -> float:
+        """Analyze player behavior to detect signs of being overwhelmed.
+
+        Returns a modifier from -0.3 (players clearly struggling) to +0.1
+        (players confidently aggressive).
+
+        Key signals:
+          - All players stationary/hiding = overwhelmed
+          - All players defensive = under pressure
+          - Mix of aggressive styles = confident and pushing
+        """
+        if not player_profiles:
+            return 0.0
+
+        styles = []
+        for pid, profile in player_profiles.items():
+            if profile.get("confidence", 0) < 0.3:
+                continue
+            styles.append(profile.get("style", "unknown"))
+
+        if not styles:
+            return 0.0
+
+        # Only truly stationary/hiding players count as passive.
+        # "cautious_observer" is removed — a player scouting/driving is not struggling.
+        passive_styles = {"defensive_sniper", "overwatch"}
+        aggressive_styles = {"aggressive_assault", "aggressive_push",
+                             "vehicle_rusher", "flanking_maneuver"}
+
+        passive_count = sum(1 for s in styles if s in passive_styles)
+        aggressive_count = sum(1 for s in styles if s in aggressive_styles)
+        total = len(styles)
+
+        # Track consecutive ticks where ALL players are passive
+        if passive_count == total and total > 0:
+            self._all_players_passive_ticks += 1
+        else:
+            self._all_players_passive_ticks = 0
+
+        passive_ratio = passive_count / total
+        aggressive_ratio = aggressive_count / total
+
+        # All passive = strong signal players are struggling
+        if passive_ratio >= 1.0:
+            return -0.3
+        elif passive_ratio >= 0.7:
+            return -0.2
+        elif passive_ratio >= 0.5:
+            return -0.1
+        elif aggressive_ratio >= 0.7:
+            return 0.1
+        return 0.0
+
+    def _select_tier(self, modifier: float, mercy_active: bool) -> DifficultyTier:
+        """Map the continuous difficulty modifier to a discrete tier."""
+        if mercy_active:
+            return DifficultyTier.MERCY
+
+        if modifier <= 0.3:
+            return DifficultyTier.EASY
+        elif modifier <= 0.6:
+            return DifficultyTier.REDUCED
+        elif modifier <= 1.0:
+            return DifficultyTier.BALANCED
+        elif modifier <= 1.3:
+            return DifficultyTier.ELEVATED
+        elif modifier <= 1.7:
+            return DifficultyTier.HARD
+        else:
+            return DifficultyTier.RUTHLESS
+
+    def update(self, game_state: dict, player_profiles: dict = None) -> dict:
+        """Main update — compute difficulty from current battle state.
+
+        This method:
+          1. Ingests new kill events from game_state
+          2. Computes recent kill ratio (sliding window)
+          3. Analyzes player behavior for distress signals
+          4. Checks mercy rule
+          5. Computes new difficulty modifier with adaptive alpha
+          6. Selects difficulty tier
+          7. Returns both the tier and the concrete parameters
+
+        The returned parameters dict contains mechanical limits that the
+        middleware MUST enforce on LLM-generated commands.
+        """
+        now = time.time()
+        dt = now - self._last_update
+        self._last_update = now
+
+        # 1. Ingest events
+        for event in game_state.get("recent_events", []):
+            if isinstance(event, str):
+                self.track_engagement(event)
+
+        # 2. Recent kill ratio
+        recent_pk, recent_ak = self._get_recent_kill_ratio(window_seconds=300.0)
+        total_recent = recent_pk + recent_ak
+
+        # 3. Player behavior analysis
+        profiles = player_profiles or {}
+        behavior_modifier = self._analyze_player_behavior_signals(profiles)
+
+        # 4. Mercy rule check
+        mission_time = game_state.get("mission_time_seconds", 0.0)
+        mercy_active = self._check_mercy_rule(recent_pk, recent_ak, profiles,
+                                              mission_time=mission_time)
+
+        # 5. Compute imbalance and update modifier
+        imbalance = self._compute_imbalance_score(recent_pk, recent_ak)
+
+        # Adaptive alpha: the more extreme the imbalance, the faster we adjust.
+        # Normal games use alpha=0.15 for smooth transitions.
+        # Lopsided games (14:0) use alpha=0.5 for rapid response.
+        base_alpha = 0.15
+        imbalance_magnitude = abs(imbalance)
+        if imbalance_magnitude > 0.7:
+            alpha = 0.5   # Rapid response to extreme imbalance
+        elif imbalance_magnitude > 0.4:
+            alpha = 0.3   # Faster response to moderate imbalance
+        else:
+            alpha = base_alpha
+
+        # Target difficulty based on imbalance score
+        # imbalance = -1.0 (AI dominating) -> target = 0.2 (very low)
+        # imbalance =  0.0 (balanced)      -> target = 1.0
+        # imbalance = +1.0 (players dominating) -> target = 2.0
+        if imbalance < 0:
+            # AI winning: reduce difficulty. Non-linear so extreme cases drop faster.
+            target = 1.0 + imbalance * 0.8  # range [0.2, 1.0]
+        else:
+            # Players winning: increase difficulty
+            target = 1.0 + imbalance * 1.0  # range [1.0, 2.0]
+
+        # Apply behavior modifier
+        target += behavior_modifier
+
+        # Time-based escalation: enemies get harder as time goes on.
+        # Ramps from +0.0 at mission start to +0.6 at 30 minutes,
+        # with a gentle curve that accelerates after the first 5 minutes.
+        if mission_time > 300:  # After 5 minutes of warm-up
+            elapsed_past_warmup = mission_time - 300
+            # Logarithmic ramp: fast initial climb, then tapering
+            # At 10min: +0.15, 15min: +0.25, 20min: +0.35, 30min: +0.50
+            time_escalation = min(0.6, 0.15 * math.log2(1 + elapsed_past_warmup / 300))
+            target += time_escalation
+
+        # Clamp target
+        target = max(0.15, min(2.0, target))
+
+        # EMA update
+        self.difficulty_modifier += alpha * (target - self.difficulty_modifier)
+        self.difficulty_modifier = max(0.15, min(2.0, self.difficulty_modifier))
+
+        # Track zero-kill ticks for faster mercy activation
+        if recent_pk == 0 and recent_ak > 0:
+            self._consecutive_ticks_zero_player_kills += 1
+        elif recent_pk > 0:
+            self._consecutive_ticks_zero_player_kills = 0
+
+        # 6. Select tier
+        new_tier = self._select_tier(self.difficulty_modifier, mercy_active)
+        if new_tier != self.current_tier:
+            log.info("Difficulty tier changed: %s -> %s (modifier=%.2f, "
+                     "mercy=%s, pk=%d, ak=%d)",
+                     self.current_tier.value, new_tier.value,
+                     self.difficulty_modifier, mercy_active,
+                     recent_pk, recent_ak)
+            self.current_tier = new_tier
+
+        # 7. Get parameters for this tier
+        params = _DIFFICULTY_TIER_PARAMS[self.current_tier]
+
+        return {
+            "modifier": round(self.difficulty_modifier, 2),
+            "tier": self.current_tier.value,
+            "parameters": params.to_dict(),
+            "player_kills_recent": recent_pk,
+            "ai_kills_recent": recent_ak,
+            "player_kills_total": self._player_kills_total,
+            "ai_kills_total": self._ai_kills_total,
+            "imbalance_score": round(imbalance, 3),
+            "behavior_modifier": round(behavior_modifier, 2),
+            "mercy_active": mercy_active,
+            "alpha_used": round(alpha, 2),
+            "assessment": self._assessment_label(),
+            "consecutive_zero_kill_ticks": self._consecutive_ticks_zero_player_kills,
+        }
+
+    def _assessment_label(self) -> str:
+        """Human-readable assessment for logs and LLM prompt."""
+        labels = {
+            DifficultyTier.MERCY: "MERCY_MODE_players_need_help",
+            DifficultyTier.EASY: "ai_dominating_heavy_nerf",
+            DifficultyTier.REDUCED: "ai_ahead_moderate_nerf",
+            DifficultyTier.BALANCED: "balanced_maintain_tempo",
+            DifficultyTier.ELEVATED: "players_ahead_increase_pressure",
+            DifficultyTier.HARD: "players_dominating_full_force",
+            DifficultyTier.RUTHLESS: "players_stomping_maximum_force",
+        }
+        return labels.get(self.current_tier, "unknown")
+
+    def get_parameters(self) -> DifficultyParameters:
+        """Get current difficulty parameters for command enforcement."""
+        return _DIFFICULTY_TIER_PARAMS[self.current_tier]
+
+
+def enforce_difficulty_on_commands(commands: list, params: DifficultyParameters,
+                                   current_squad_count: int) -> list:
+    """Mechanically enforce difficulty parameters on LLM-generated commands.
+
+    This function is the critical enforcement layer. The LLM generates commands
+    as an unrestricted AI commander, but this function applies hard limits
+    based on the current difficulty tier BEFORE commands reach the game engine.
+
+    Enforcement rules:
+      1. If suppress_spawn_commands is True, remove all spawn commands
+      2. If squad count exceeds max_active_squads, remove spawn commands
+      3. If heavy_vehicle_allowed is False, downgrade heavy vehicle spawns
+      4. Cap the number of simultaneous attack commands
+      5. Force retreat commands for a percentage of squads
+      6. Inject accuracy/reaction parameters into attack/engage commands
+    """
+    if not commands:
+        return commands
+
+    enforced = []
+    attack_count = 0
+    spawn_count = 0
+
+    _HEAVY_VEHICLES = {"t72", "bmp1", "btr70"}
+    _LIGHT_VEHICLES = {"uaz469", "uaz469_mg", "ural_truck"}
+    _ATTACK_COMMANDS = {
+        "attack", "seek_and_destroy", "suppress", "breach",
+        "flank_left", "flank_right", "dismount_assault",
+    }
+
+    for cmd in commands:
+        ct = cmd.get("command_type", "")
+
+        # Rule 1 & 2: Spawn suppression
+        if ct in ("spawn_infantry", "spawn_vehicle", "spawn_reinforcements"):
+            if params.suppress_spawn_commands:
+                log.info("Difficulty enforcement: BLOCKED spawn command "
+                         "(mercy/suppression active)")
+                continue
+            if current_squad_count >= params.max_active_squads:
+                log.info("Difficulty enforcement: BLOCKED spawn command "
+                         "(squad cap %d reached)", params.max_active_squads)
+                continue
+            spawn_count += 1
+
+        # Rule 3: Heavy vehicle downgrade
+        if ct == "spawn_vehicle" and not params.heavy_vehicle_allowed:
+            vehicle_type = cmd.get("parameters", "").strip().lower()
+            if vehicle_type in _HEAVY_VEHICLES:
+                replacement = random.choice(list(_LIGHT_VEHICLES))
+                log.info("Difficulty enforcement: downgraded %s -> %s "
+                         "(heavy vehicles blocked)", vehicle_type, replacement)
+                cmd["parameters"] = replacement
+
+        # Rule 4: Attack command cap
+        if ct in _ATTACK_COMMANDS:
+            attack_count += 1
+            if attack_count > params.max_simultaneous_attackers:
+                # Convert excess attacks to defensive posture
+                log.info("Difficulty enforcement: converted attack -> defend "
+                         "(max %d attackers)", params.max_simultaneous_attackers)
+                cmd["command_type"] = "defend"
+
+        # Rule 6: Inject accuracy/reaction parameters into combat commands
+        if ct in _ATTACK_COMMANDS or ct in ("overwatch", "defend", "patrol"):
+            existing_params = cmd.get("parameters", "")
+            skill_params = (f"skill={params.accuracy_multiplier:.2f},"
+                            f"reaction={params.reaction_time_multiplier:.1f}")
+            if existing_params:
+                cmd["parameters"] = f"{existing_params},{skill_params}"
+            else:
+                cmd["parameters"] = skill_params
+
+        # Enforce engagement range
+        if ct in _ATTACK_COMMANDS:
+            existing_params = cmd.get("parameters", "")
+            cmd["parameters"] = (f"{existing_params},"
+                                 f"engage_range={params.engagement_range_cap:.0f}")
+
+        enforced.append(cmd)
+
+    return enforced
+
+
+def generate_forced_retreats(enemy_units: list,
+                              params: DifficultyParameters) -> list:
+    """Generate retreat commands for a percentage of AI squads.
+
+    When difficulty is low (AI dominating), force some squads to retreat
+    to reduce combat pressure on players. This creates a mechanical effect
+    independent of LLM decision-making.
+    """
+    if params.force_retreat_pct <= 0 or not enemy_units:
+        return []
+
+    retreat_count = max(1, int(len(enemy_units) * params.force_retreat_pct))
+    # Prioritize retreating the squads closest to players or with highest strength
+    # (removing the most threatening units)
+    sorted_units = sorted(enemy_units,
+                          key=lambda u: u.get("strength", 0), reverse=True)
+
+    retreat_commands = []
+    for unit in sorted_units[:retreat_count]:
+        uid = unit.get("unit_id", "")
+        if not uid:
+            continue
+        pos = unit.get("position", [0, 0, 0])
+        # Retreat 500m away from current position (roughly toward map center)
+        retreat_pos = [pos[0] + random.uniform(-500, 500),
+                       0,
+                       pos[2] + random.uniform(-500, 500)]
+        retreat_commands.append({
+            "command_type": "retreat",
+            "unit_id": uid,
+            "target_position": f"{retreat_pos[0]:.0f},0,{retreat_pos[2]:.0f}",
+            "parameters": "forced_by_difficulty",
+            "narrative": "",
+            "reasoning": f"difficulty_enforcement_retreat "
+                         f"(tier={params.aggression_cap})",
+        })
+        log.info("Difficulty enforcement: forced retreat for %s "
+                 "(strength=%d)", uid, unit.get("strength", 0))
+
+    return retreat_commands

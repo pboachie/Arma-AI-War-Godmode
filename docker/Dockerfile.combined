@@ -1,0 +1,82 @@
+# Combined Arma Reforger + GodMode Middleware Container
+# Runs both the game server and AI middleware in a single container via supervisord.
+
+# ── Stage 1: Build Python dependencies ──
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+COPY middleware/requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# ── Stage 2: Runtime (python:3.12-slim already has glibc 2.38 + Python 3.12) ──
+FROM python:3.12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System packages: 32-bit libs for Arma + supervisor + tools
+RUN dpkg --add-architecture i386 && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        lib32stdc++6 \
+        lib32gcc-s1 \
+        wget \
+        ca-certificates \
+        libcurl4 \
+        net-tools \
+        curl \
+        supervisor \
+        procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy pip-installed packages from builder stage
+COPY --from=builder /install /usr/local
+
+# Create user
+RUN useradd -m -d /home/reforger -s /bin/bash reforger
+
+# Create directories
+RUN mkdir -p \
+    /home/reforger/steamcmd \
+    /home/reforger/configs \
+    /home/reforger/profile \
+    /home/reforger/workshop \
+    /home/reforger/reforger_bins \
+    /home/reforger/logs \
+    /app \
+    /app/replays \
+    /app/logs \
+    /app/battle_summaries
+
+# Install SteamCMD
+RUN wget -qO /tmp/steamcmd_linux.tar.gz \
+        https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz && \
+    tar -xzf /tmp/steamcmd_linux.tar.gz -C /home/reforger/steamcmd && \
+    rm /tmp/steamcmd_linux.tar.gz
+
+# Copy Arma server launcher
+COPY docker/launch.py /home/reforger/launch.py
+
+# Copy middleware application
+COPY middleware/server.py /app/
+COPY middleware/agents.py /app/
+COPY middleware/dashboard.html /app/
+COPY middleware/scaling_engine.py* /app/
+COPY middleware/server_integration.py* /app/
+COPY middleware/server_manager.py* /app/
+COPY middleware/rcon_client.py* /app/
+COPY middleware/a2s_client.py* /app/
+COPY middleware/auth.py* /app/
+
+# Copy supervisor config
+COPY docker/supervisord.conf /etc/supervisor/conf.d/godmode.conf
+
+# Fix ownership
+RUN chown -R reforger:reforger /home/reforger /app
+
+# Expose ports: game (UDP) + A2S (UDP) + RCON (UDP) + middleware (TCP)
+EXPOSE 2001/udp 17777/udp 19999/udp 8000
+
+USER reforger
+WORKDIR /home/reforger
+
+CMD ["supervisord", "-n", "-c", "/etc/supervisor/conf.d/godmode.conf"]

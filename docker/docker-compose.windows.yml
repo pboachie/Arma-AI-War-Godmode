@@ -1,0 +1,9 @@
+# Windows override — use port mapping instead of network_mode: host
+# Usage: docker compose -f docker-compose.arma.yml -f docker-compose.windows.yml up -d
+services:
+  arma-server:
+    network_mode: ""
+    ports:
+      - "${GAME_PORT:-2001}:2001/udp"
+      - "${STEAM_PORT:-17777}:17777/udp"
+      - "${RCON_PORT:-19999}:19999/tcp"

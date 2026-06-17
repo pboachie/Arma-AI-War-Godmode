@@ -1,6 +1,8 @@
-# Arma Reforger — LLM God Mode Game Master
+# Arma Reforger — AI War: 100% LLM-Managed Gamemode
 
-An AI-driven Game Master that controls weather, vehicles, AI squads, environmental effects, and dynamic narrative in Arma Reforger — all orchestrated by an external LLM via REST API.
+A fully autonomous AI Game Master — no human admins, no scripted events, no pre-programmed scenarios. An LLM commands the entire battlefield in real-time: tactics, weather, reinforcements, narrative, and difficulty — all decisions made by AI, every second of every match.
+
+> **Zero human intervention.** The LLM reads the battlefield, thinks strategically, and issues orders. Players fight a war that adapts, learns, and evolves — driven entirely by artificial intelligence.
 
 ## Architecture
 
@@ -55,6 +57,10 @@ docker compose up -d
 
 Verify: `curl http://localhost:8000/health`
 
+> **Need a dedicated server?** This repo does not ship the Arma Reforger server
+> binaries or game data. See [docs/SERVER_SETUP.md](docs/SERVER_SETUP.md) for
+> installing the server and generating a `config.json` from the template.
+
 ### 2. Install the mod in Arma Reforger Workbench
 
 1. Create a new mod project in Workbench
@@ -92,8 +98,13 @@ arma-godmode/
 │   ├── GM_ParticleController.c    ← Visual effects (explosions, smoke, flares)
 │   ├── GM_NarrativeManager.c      ← Notifications, radio, objectives
 │   └── GM_TriggerManager.c        ← Spatial trigger zones
-├── Configs/GodMode/
-│   └── gm_config.json             ← Runtime configuration reference
+├── Configs/
+│   ├── GodMode/
+│   │   └── gm_config.json         ← Runtime configuration reference
+│   └── ArmaServer/
+│       └── config.template.json   ← Sanitized dedicated-server config template
+├── docs/
+│   └── SERVER_SETUP.md            ← Dedicated-server install & config guide
 ├── middleware/
 │   ├── server.py                  ← FastAPI middleware server
 │   ├── requirements.txt           ← Python dependencies
@@ -101,8 +112,13 @@ arma-godmode/
 │   ├── .env.example               ← Environment template
 │   ├── Dockerfile                 ← Container build
 │   └── docker-compose.yml         ← One-command deploy
+├── LICENSE
 └── README.md
 ```
+
+> The `Arma Reforger Server/` install (binaries, SteamCMD, BattlEye, game data)
+> is **not** part of this repository — it is `.gitignore`d. Bring your own; see
+> [docs/SERVER_SETUP.md](docs/SERVER_SETUP.md).
 
 ## How It Works
 
@@ -248,3 +264,19 @@ The system prompt in `server.py` is where 80% of gameplay quality comes from. Tu
 - Map-specific knowledge (add known positions, terrain features)
 - Narrative style (radio chatter tone, immersion level)
 - Force composition preferences
+
+## Security
+
+- **Never commit secrets.** API keys live in `middleware/.env` (gitignored); use
+  `middleware/.env.example` as the template.
+- **Server passwords** (admin/RCON) are injected at config-generation time from
+  environment variables — they are never stored in the tracked template.
+- The generated `config.json` and all runtime data (`battle_history/`,
+  `replays/`, logs) are gitignored.
+
+## License
+
+This project's original code is released under the [MIT License](LICENSE).
+Arma Reforger and its assets are © Bohemia Interactive a.s. and are **not**
+covered by this license — you must own the game and follow Bohemia's EULA and
+server-hosting terms.

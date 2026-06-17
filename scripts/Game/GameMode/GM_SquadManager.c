@@ -19,6 +19,10 @@ class GM_SquadManager
     protected ref map<string, int> m_mKillsSinceReport;           // squad_id -> kills this cycle
     protected ref map<string, int> m_mCasualtiesSinceReport;      // squad_id -> losses this cycle
 
+    // ── Runtime prefab cache (auto-discovered from entity catalog) ──
+    protected ref map<string, ResourceName> m_mCatalogGroups = new map<string, ResourceName>();
+    protected bool m_bCatalogReady = false;
+
     void Init()
     {
         m_mCurrentOrders = new map<string, string>();
@@ -26,6 +30,63 @@ class GM_SquadManager
         m_mOrderTimestamps = new map<string, float>();
         m_mKillsSinceReport = new map<string, int>();
         m_mCasualtiesSinceReport = new map<string, int>();
+        m_mCatalogGroups = new map<string, ResourceName>();
+    }
+
+    // ── Lazy catalog discovery — runs once on first spawn ──
+    protected void EnsureCatalog()
+    {
+        if (m_bCatalogReady) return;
+
+        SCR_EntityCatalogManagerComponent catalogMgr = SCR_EntityCatalogManagerComponent.GetInstance();
+        if (!catalogMgr) return;
+
+        SCR_EntityCatalog groupCatalog = catalogMgr.GetEntityCatalogOfType(EEntityCatalogType.GROUP);
+        if (!groupCatalog) return;
+
+        array<SCR_EntityCatalogEntry> entries = new array<SCR_EntityCatalogEntry>();
+        groupCatalog.GetEntityList(entries);
+        if (entries.Count() == 0) return;
+
+        foreach (SCR_EntityCatalogEntry entry : entries)
+        {
+            ResourceName prefab = entry.GetPrefab();
+            string s = "" + prefab;
+
+            // USSR groups
+            if (s.Contains("USSR_RifleSquad"))      m_mCatalogGroups.Set("ussr_rifle_squad", prefab);
+            else if (s.Contains("USSR_FireTeam"))    m_mCatalogGroups.Set("ussr_fire_team", prefab);
+            else if (s.Contains("USSR_MachineGun") || s.Contains("USSR_MGTeam"))
+                                                     m_mCatalogGroups.Set("ussr_mg_team", prefab);
+            else if (s.Contains("USSR_AntiTank") || s.Contains("USSR_ATTeam"))
+                                                     m_mCatalogGroups.Set("ussr_at_team", prefab);
+            else if (s.Contains("USSR_Sniper"))      m_mCatalogGroups.Set("ussr_sniper_team", prefab);
+            // US groups
+            else if (s.Contains("US_RifleSquad"))    m_mCatalogGroups.Set("us_rifle_squad", prefab);
+            else if (s.Contains("US_FireTeam"))      m_mCatalogGroups.Set("us_fire_team", prefab);
+            else if (s.Contains("US_MachineGun") || s.Contains("US_MGTeam"))
+                                                     m_mCatalogGroups.Set("us_mg_team", prefab);
+            else if (s.Contains("US_AntiTank") || s.Contains("US_ATTeam"))
+                                                     m_mCatalogGroups.Set("us_at_team", prefab);
+            else if (s.Contains("US_Sniper"))        m_mCatalogGroups.Set("us_sniper_team", prefab);
+            // FIA
+            else if (s.Contains("FIA_RifleSquad"))   m_mCatalogGroups.Set("fia_squad", prefab);
+        }
+
+        m_bCatalogReady = (m_mCatalogGroups.Count() > 0);
+        Print("[GodMode:Squad] Catalog discovery: found " + m_mCatalogGroups.Count() + " group prefabs");
+        for (int i = 0; i < m_mCatalogGroups.Count(); i++)
+            Print("[GodMode:Squad]   " + m_mCatalogGroups.GetKey(i) + " = " + m_mCatalogGroups.GetElement(i));
+    }
+
+    // Resolve prefab: catalog first, hardcoded fallback
+    protected ResourceName ResolveGroupPrefab(string grpType)
+    {
+        EnsureCatalog();
+        ResourceName found;
+        if (m_mCatalogGroups.Find(grpType, found))
+            return found;
+        return GetGroupPrefab(grpType);
     }
 
     void SetOwner(GM_GodModeComponent owner)
@@ -37,15 +98,50 @@ class GM_SquadManager
     // Spawning
     // ═══════════════════════════════════════════════
 
+    // Remove squads that have 0 living agents (ghost squads)
+    void PurgeDeadSquads()
+    {
+        ref array<string> toRemove = {};
+        for (int i = 0; i < m_mSquads.Count(); i++)
+        {
+            string sid = m_mSquads.GetKey(i);
+            SCR_AIGroup group = m_mSquads.GetElement(i);
+
+            if (!group || group.GetAgentsCount() == 0)
+                toRemove.Insert(sid);
+        }
+
+        foreach (string deadId : toRemove)
+        {
+            SCR_AIGroup deadGroup = null;
+            m_mSquads.Find(deadId, deadGroup);
+            if (deadGroup)
+                SCR_EntityHelper.DeleteEntityAndChildren(deadGroup);
+            m_mSquads.Remove(deadId);
+            m_mCurrentOrders.Remove(deadId);
+            m_mOrderTargets.Remove(deadId);
+            m_mOrderTimestamps.Remove(deadId);
+            m_mKillsSinceReport.Remove(deadId);
+            m_mCasualtiesSinceReport.Remove(deadId);
+        }
+
+        if (toRemove.Count() > 0)
+            Print("[GodMode:Squad] Purged " + toRemove.Count() + " dead/empty squads (now " + m_mSquads.Count() + " active)");
+    }
+
     string SpawnGroup(string groupType, vector position)
     {
+        // Clean up ghost squads before checking limit
+        PurgeDeadSquads();
+
         if (m_mSquads.Count() >= m_iMaxSquads)
         {
-            Print("[GodMode:Squad] At squad limit (" + m_iMaxSquads + "), cannot spawn", LogLevel.WARNING);
+            Print("[GodMode:Squad] At squad limit (" + m_iMaxSquads + ") even after purge, cannot spawn", LogLevel.WARNING);
             return "";
         }
 
-        ResourceName prefab = GetGroupPrefab(groupType);
+        // Try catalog-discovered prefab first, then hardcoded
+        ResourceName prefab = ResolveGroupPrefab(groupType);
         if (prefab == "")
         {
             Print("[GodMode:Squad] Unknown group type: " + groupType, LogLevel.WARNING);
@@ -55,9 +151,24 @@ class GM_SquadManager
         Resource res = Resource.Load(prefab);
         if (!res || !res.IsValid())
         {
-            Print("[GodMode:Squad] Failed to load: " + prefab, LogLevel.ERROR);
-            return "";
+            Print("[GodMode:Squad] Prefab unavailable: " + prefab + " — trying fallback", LogLevel.WARNING);
+            string fbType = GetFallbackType(groupType);
+            ResourceName fallback = ResolveGroupPrefab(fbType);
+            if (fallback == "") fallback = GetFallbackPrefab(groupType);
+            if (fallback != "")
+            {
+                res = Resource.Load(fallback);
+                groupType = fbType;
+            }
+            if (!res || !res.IsValid())
+            {
+                Print("[GodMode:Squad] Fallback also failed", LogLevel.ERROR);
+                return "";
+            }
         }
+
+        // Check if position is underwater — find dry land if so
+        position = FindDryLandPosition(position);
 
         EntitySpawnParams params = new EntitySpawnParams();
         params.TransformMode = ETransformMode.WORLD;
@@ -91,7 +202,17 @@ class GM_SquadManager
         group.GetOnEmpty().Insert(OnSquadEmpty);
         group.GetOnAgentRemoved().Insert(OnAgentLost);
 
-        Print("[GodMode:Squad] Spawned " + groupType + " → " + sid + " (" + group.GetAgentsCount() + " agents)");
+        int agentCount = group.GetAgentsCount();
+        Print("[GodMode:Squad] Spawned " + groupType + " → " + sid + " (" + agentCount + " agents)");
+
+        // If the formation system failed to populate agents, manually spawn soldiers
+        if (agentCount == 0)
+        {
+            int soldiersToSpawn = GetDesiredSquadSize(groupType);
+            Print("[GodMode:Squad] Formation system produced 0 agents — manually spawning " + soldiersToSpawn + " soldiers");
+            ManuallyPopulateGroup(group, groupType, position, soldiersToSpawn);
+        }
+
         return sid;
     }
 
@@ -116,7 +237,7 @@ class GM_SquadManager
         if (!group) return;
 
         AIWaypoint wp = SpawnWaypoint(
-            "{22A875E30470BD4F}Prefabs/AI/Waypoints/AIWaypoint_Move.et",
+            "{750A8D1695BD6998}Prefabs/AI/Waypoints/AIWaypoint_Move.et",
             destination);
         if (!wp) return;
 
@@ -135,7 +256,7 @@ class GM_SquadManager
         if (!group) return;
 
         AIWaypoint wp = SpawnWaypoint(
-            "{06E1B6EBD480C6E0}Prefabs/AI/Waypoints/AIWaypoint_Attack.et",
+            "{1B0E3436C30FA211}Prefabs/AI/Waypoints/AIWaypoint_Attack.et",
             target);
         if (!wp) return;
 
@@ -154,7 +275,7 @@ class GM_SquadManager
         if (!group) return;
 
         AIWaypoint wp = SpawnWaypoint(
-            "{B3E7B883E4D9E678}Prefabs/AI/Waypoints/AIWaypoint_Defend.et",
+            "{93291E72AC23930F}Prefabs/AI/Waypoints/AIWaypoint_Defend.et",
             position);
         if (!wp) return;
 
@@ -186,7 +307,7 @@ class GM_SquadManager
             patrolPt[1] = GetGame().GetWorld().GetSurfaceY(patrolPt[0], patrolPt[2]);
 
             AIWaypoint wp = SpawnWaypoint(
-                "{22A875E30470BD4F}Prefabs/AI/Waypoints/AIWaypoint_Move.et",
+                "{750A8D1695BD6998}Prefabs/AI/Waypoints/AIWaypoint_Move.et",
                 patrolPt);
             if (wp)
             {
@@ -197,7 +318,7 @@ class GM_SquadManager
 
         // Cycle waypoint to loop
         AIWaypoint cycleWp = SpawnWaypoint(
-            "{1B556F5FB6051E42}Prefabs/AI/Waypoints/AIWaypoint_Cycle.et",
+            "{35BD6541CBB8AC08}Prefabs/AI/Waypoints/AIWaypoint_Cycle.et",
             center);
         if (cycleWp)
             group.AddWaypoint(cycleWp);
@@ -215,7 +336,7 @@ class GM_SquadManager
         if (!group) return;
 
         AIWaypoint wp = SpawnWaypoint(
-            "{750A8D1695BD09B6}Prefabs/AI/Waypoints/AIWaypoint_SearchAndDestroy.et",
+            "{B3E7B8DC2BAB8ACC}Prefabs/AI/Waypoints/AIWaypoint_SearchAndDestroy.et",
             area);
         if (!wp) return;
 
@@ -235,7 +356,7 @@ class GM_SquadManager
 
         // Move to position silently
         AIWaypoint moveWp = SpawnWaypoint(
-            "{22A875E30470BD4F}Prefabs/AI/Waypoints/AIWaypoint_Move.et",
+            "{750A8D1695BD6998}Prefabs/AI/Waypoints/AIWaypoint_Move.et",
             position);
         if (moveWp)
         {
@@ -245,7 +366,7 @@ class GM_SquadManager
 
         // Then hold and engage
         AIWaypoint defendWp = SpawnWaypoint(
-            "{B3E7B883E4D9E678}Prefabs/AI/Waypoints/AIWaypoint_Defend.et",
+            "{93291E72AC23930F}Prefabs/AI/Waypoints/AIWaypoint_Defend.et",
             position);
         if (defendWp)
         {
@@ -269,7 +390,7 @@ class GM_SquadManager
         group.CompleteAllWaypoints();
 
         AIWaypoint wp = SpawnWaypoint(
-            "{22A875E30470BD4F}Prefabs/AI/Waypoints/AIWaypoint_Move.et",
+            "{750A8D1695BD6998}Prefabs/AI/Waypoints/AIWaypoint_Move.et",
             fallbackPosition);
         if (wp)
         {
@@ -293,16 +414,51 @@ class GM_SquadManager
         SCR_AIGroup group = GetGroup(squadId);
         if (!group) return;
 
-        // Attack waypoint aimed at target — with completion radius 0 so they never "arrive"
-        AIWaypoint wp = SpawnWaypoint(
-            "{06E1B6EBD480C6E0}Prefabs/AI/Waypoints/AIWaypoint_Attack.et",
-            target);
-        if (!wp) return;
+        // Calculate a position 150m away from target facing it — units suppress FROM COVER,
+        // not by charging into the target. Move to overwatch range, then defend (fire at will).
+        vector groupPos = group.GetOrigin();
+        vector toTarget = target - groupPos;
+        float distToTarget = toTarget.Length();
 
-        wp.SetCompletionRadius(0);
-        group.AddWaypoint(wp);
+        // If already within 100-250m, hold current position and engage.
+        // Otherwise, move to a position ~150m from target along the approach axis.
+        vector suppressPos;
+        if (distToTarget >= 80 && distToTarget <= 300)
+        {
+            // Already at decent suppress range — hold here
+            suppressPos = groupPos;
+        }
+        else
+        {
+            // Move to 150m from target along current approach direction
+            float desiredDist = 150.0;
+            if (distToTarget > 1.0)
+            {
+                vector dir = toTarget / distToTarget; // normalize
+                suppressPos = target - dir * desiredDist;
+            }
+            else
+            {
+                suppressPos = groupPos; // too close to compute direction, stay put
+            }
+        }
+        suppressPos[1] = GetGame().GetWorld().GetSurfaceY(suppressPos[0], suppressPos[2]);
 
-        Print("[GodMode:Squad] " + squadId + " → SUPPRESS at " + target.ToString(false));
+        // Move to suppress position
+        AIWaypoint moveWp = SpawnWaypoint(
+            "{750A8D1695BD6998}Prefabs/AI/Waypoints/AIWaypoint_Move.et",
+            suppressPos);
+        if (moveWp) { moveWp.SetCompletionRadius(15); group.AddWaypoint(moveWp); }
+
+        // Then defend from that position — AI will engage enemies at the target area
+        // while staying at their suppress position (not charging in)
+        AIWaypoint defendWp = SpawnWaypoint(
+            "{93291E72AC23930F}Prefabs/AI/Waypoints/AIWaypoint_Defend.et",
+            suppressPos);
+        if (defendWp) { defendWp.SetCompletionRadius(50); group.AddWaypoint(defendWp); }
+
+        Print("[GodMode:Squad] " + squadId + " → SUPPRESS at " + target.ToString(false)
+              + " from " + suppressPos.ToString(false) + " (dist=" + distToTarget + "m)");
         m_mCurrentOrders.Set(squadId, "suppress");
         m_mOrderTargets.Set(squadId, target);
         m_mOrderTimestamps.Set(squadId, System.GetTickCount() / 1000.0);
@@ -315,13 +471,13 @@ class GM_SquadManager
 
         // Move to position first
         AIWaypoint moveWp = SpawnWaypoint(
-            "{22A875E30470BD4F}Prefabs/AI/Waypoints/AIWaypoint_Move.et",
+            "{750A8D1695BD6998}Prefabs/AI/Waypoints/AIWaypoint_Move.et",
             position);
         if (moveWp) { moveWp.SetCompletionRadius(10); group.AddWaypoint(moveWp); }
 
         // Then defend (overwatch)
         AIWaypoint defendWp = SpawnWaypoint(
-            "{B3E7B883E4D9E678}Prefabs/AI/Waypoints/AIWaypoint_Defend.et",
+            "{93291E72AC23930F}Prefabs/AI/Waypoints/AIWaypoint_Defend.et",
             position);
         if (defendWp) { defendWp.SetCompletionRadius(30); group.AddWaypoint(defendWp); }
 
@@ -339,7 +495,7 @@ class GM_SquadManager
         group.CompleteAllWaypoints();
 
         AIWaypoint wp = SpawnWaypoint(
-            "{22A875E30470BD4F}Prefabs/AI/Waypoints/AIWaypoint_Move.et",
+            "{750A8D1695BD6998}Prefabs/AI/Waypoints/AIWaypoint_Move.et",
             destination);
         if (!wp) return;
 
@@ -359,12 +515,12 @@ class GM_SquadManager
 
         // Move to building position and defend (garrison behavior)
         AIWaypoint moveWp = SpawnWaypoint(
-            "{22A875E30470BD4F}Prefabs/AI/Waypoints/AIWaypoint_Move.et",
+            "{750A8D1695BD6998}Prefabs/AI/Waypoints/AIWaypoint_Move.et",
             buildingPos);
         if (moveWp) { moveWp.SetCompletionRadius(10); group.AddWaypoint(moveWp); }
 
         AIWaypoint defendWp = SpawnWaypoint(
-            "{B3E7B883E4D9E678}Prefabs/AI/Waypoints/AIWaypoint_Defend.et",
+            "{93291E72AC23930F}Prefabs/AI/Waypoints/AIWaypoint_Defend.et",
             buildingPos);
         if (defendWp) { defendWp.SetCompletionRadius(30); group.AddWaypoint(defendWp); }
 
@@ -380,12 +536,12 @@ class GM_SquadManager
         if (!group) return;
 
         AIWaypoint moveWp = SpawnWaypoint(
-            "{22A875E30470BD4F}Prefabs/AI/Waypoints/AIWaypoint_Move.et",
+            "{750A8D1695BD6998}Prefabs/AI/Waypoints/AIWaypoint_Move.et",
             position);
         if (moveWp) { moveWp.SetCompletionRadius(5); group.AddWaypoint(moveWp); }
 
         AIWaypoint defWp = SpawnWaypoint(
-            "{B3E7B883E4D9E678}Prefabs/AI/Waypoints/AIWaypoint_Defend.et",
+            "{93291E72AC23930F}Prefabs/AI/Waypoints/AIWaypoint_Defend.et",
             position);
         if (defWp) { defWp.SetCompletionRadius(20); group.AddWaypoint(defWp); }
 
@@ -403,12 +559,12 @@ class GM_SquadManager
 
         // Parse phase lines: "x1,z1;x2,z2;x3,z3"
         array<string> phases = {};
-        phaseLines.Split(";", phases);
+        phaseLines.Split(";", phases, false);
 
         foreach (string phase : phases)
         {
             array<string> coords = {};
-            phase.Split(",", coords);
+            phase.Split(",", coords, false);
             if (coords.Count() < 2) continue;
 
             vector pos = Vector(coords[0].Trim().ToFloat(), 0, coords[1].Trim().ToFloat());
@@ -416,12 +572,12 @@ class GM_SquadManager
 
             // Defend briefly at each phase line
             AIWaypoint defWp = SpawnWaypoint(
-                "{B3E7B883E4D9E678}Prefabs/AI/Waypoints/AIWaypoint_Defend.et", pos);
+                "{93291E72AC23930F}Prefabs/AI/Waypoints/AIWaypoint_Defend.et", pos);
             if (defWp) { defWp.SetCompletionRadius(15); group.AddWaypoint(defWp); }
 
             // Then move to next
             AIWaypoint moveWp = SpawnWaypoint(
-                "{22A875E30470BD4F}Prefabs/AI/Waypoints/AIWaypoint_Move.et", pos);
+                "{750A8D1695BD6998}Prefabs/AI/Waypoints/AIWaypoint_Move.et", pos);
             if (moveWp) { moveWp.SetCompletionRadius(15); group.AddWaypoint(moveWp); }
         }
 
@@ -450,7 +606,7 @@ class GM_SquadManager
             outPt[1] = GetGame().GetWorld().GetSurfaceY(outPt[0], outPt[2]);
 
             AIWaypoint wp1 = SpawnWaypoint(
-                "{22A875E30470BD4F}Prefabs/AI/Waypoints/AIWaypoint_Move.et", outPt);
+                "{750A8D1695BD6998}Prefabs/AI/Waypoints/AIWaypoint_Move.et", outPt);
             if (wp1) { wp1.SetCompletionRadius(15); group.AddWaypoint(wp1); }
 
             // Arc point
@@ -461,18 +617,18 @@ class GM_SquadManager
             arcPt[1] = GetGame().GetWorld().GetSurfaceY(arcPt[0], arcPt[2]);
 
             AIWaypoint wp2 = SpawnWaypoint(
-                "{22A875E30470BD4F}Prefabs/AI/Waypoints/AIWaypoint_Move.et", arcPt);
+                "{750A8D1695BD6998}Prefabs/AI/Waypoints/AIWaypoint_Move.et", arcPt);
             if (wp2) { wp2.SetCompletionRadius(15); group.AddWaypoint(wp2); }
 
             // Return to center
             AIWaypoint wp3 = SpawnWaypoint(
-                "{22A875E30470BD4F}Prefabs/AI/Waypoints/AIWaypoint_Move.et", center);
+                "{750A8D1695BD6998}Prefabs/AI/Waypoints/AIWaypoint_Move.et", center);
             if (wp3) { wp3.SetCompletionRadius(15); group.AddWaypoint(wp3); }
         }
 
         // Cycle to repeat
         AIWaypoint cycleWp = SpawnWaypoint(
-            "{1B556F5FB6051E42}Prefabs/AI/Waypoints/AIWaypoint_Cycle.et", center);
+            "{35BD6541CBB8AC08}Prefabs/AI/Waypoints/AIWaypoint_Cycle.et", center);
         if (cycleWp) group.AddWaypoint(cycleWp);
 
         Print("[GodMode:Squad] " + squadId + " → CLOVERLEAF PATROL (radius " + radius + "m)");
@@ -502,7 +658,9 @@ class GM_SquadManager
         {
             float baseX = start[0] + dx * i;
             float baseZ = start[2] + dz * i;
-            float side = (i % 2 == 0) ? 1 : -1;
+            float side = -1;
+            if (i % 2 == 0)
+                side = 1;
 
             vector pt = Vector(
                 baseX + perpX * lateralOffset * side,
@@ -512,7 +670,7 @@ class GM_SquadManager
             pt[1] = GetGame().GetWorld().GetSurfaceY(pt[0], pt[2]);
 
             AIWaypoint wp = SpawnWaypoint(
-                "{22A875E30470BD4F}Prefabs/AI/Waypoints/AIWaypoint_Move.et", pt);
+                "{750A8D1695BD6998}Prefabs/AI/Waypoints/AIWaypoint_Move.et", pt);
             if (wp) { wp.SetCompletionRadius(15); group.AddWaypoint(wp); }
         }
 
@@ -560,6 +718,14 @@ class GM_SquadManager
             {
                 string sid = m_mSquads.GetKey(i);
                 m_mSquads.Remove(sid);
+
+                // Clean up all tracking maps to prevent memory leaks
+                m_mCurrentOrders.Remove(sid);
+                m_mOrderTargets.Remove(sid);
+                m_mOrderTimestamps.Remove(sid);
+                m_mKillsSinceReport.Remove(sid);
+                m_mCasualtiesSinceReport.Remove(sid);
+
                 Print("[GodMode:Squad] Wiped: " + sid);
                 if (m_pOwner)
                     m_pOwner.LogEvent("squad_wiped:" + sid);
@@ -622,27 +788,36 @@ class GM_SquadManager
         for (int i = 0; i < m_mSquads.Count(); i++)
         {
             SCR_AIGroup group = m_mSquads.GetElement(i);
+            string sid = m_mSquads.GetKey(i);
+
             if (!group)
             {
-                toRemove.Insert(m_mSquads.GetKey(i));
+                toRemove.Insert(sid);
                 continue;
             }
 
+            // Filter by faction — determine faction from the group's prefab config
+            string groupFaction = GetGroupFaction(group);
+            if (groupFaction != faction)
+                continue;
+
             GM_UnitState state = new GM_UnitState();
-            state.unit_id = m_mSquads.GetKey(i);
+            state.unit_id = sid;
             state.unit_type = "infantry_squad";
             state.position = group.GetOrigin();
             state.strength = group.GetAgentsCount();
-            state.health_pct = (state.strength > 0) ? 1.0 : 0.0;
             state.faction = faction;
+
+            // Calculate aggregate health from individual agents instead of binary 1/0
+            state.health_pct = CalculateGroupHealth(group);
 
             // Order execution feedback
             string orderType = "idle";
-            m_mCurrentOrders.Find(m_mSquads.GetKey(i), orderType);
+            m_mCurrentOrders.Find(sid, orderType);
             state.current_order = orderType;
 
             vector orderTarget = vector.Zero;
-            m_mOrderTargets.Find(m_mSquads.GetKey(i), orderTarget);
+            m_mOrderTargets.Find(sid, orderTarget);
 
             float dist = 0;
             if (orderTarget != vector.Zero)
@@ -650,12 +825,14 @@ class GM_SquadManager
             state.distance_to_objective = dist;
 
             float orderTime = 0;
-            m_mOrderTimestamps.Find(m_mSquads.GetKey(i), orderTime);
+            m_mOrderTimestamps.Find(sid, orderTime);
             float now = System.GetTickCount() / 1000.0;
-            state.time_since_order = (orderTime > 0) ? (now - orderTime) : 0;
+            state.time_since_order = 0;
+            if (orderTime > 0)
+                state.time_since_order = now - orderTime;
             state.time_in_current_order = state.time_since_order;
 
-            // Determine order status
+            // Determine order status using actual health data
             if (state.strength <= 0)
                 state.order_status = "wiped_out";
             else if (dist < 30 && orderType != "idle")
@@ -669,11 +846,11 @@ class GM_SquadManager
 
             // Combat stats
             int kills = 0;
-            m_mKillsSinceReport.Find(m_mSquads.GetKey(i), kills);
+            m_mKillsSinceReport.Find(sid, kills);
             state.kills = kills;
 
             int casualties = 0;
-            m_mCasualtiesSinceReport.Find(m_mSquads.GetKey(i), casualties);
+            m_mCasualtiesSinceReport.Find(sid, casualties);
             state.casualties = casualties;
 
             state.ammo_status = "full";  // TODO: query actual ammo when API available
@@ -683,9 +860,90 @@ class GM_SquadManager
         }
 
         foreach (string deadId : toRemove)
+        {
             m_mSquads.Remove(deadId);
+            // Also clean up orphaned tracking data
+            m_mCurrentOrders.Remove(deadId);
+            m_mOrderTargets.Remove(deadId);
+            m_mOrderTimestamps.Remove(deadId);
+            m_mKillsSinceReport.Remove(deadId);
+            m_mCasualtiesSinceReport.Remove(deadId);
+        }
 
         return states;
+    }
+
+    // Determine faction by checking the group's faction affiliation component
+    protected string GetGroupFaction(SCR_AIGroup group)
+    {
+        if (!group) return "unknown";
+
+        FactionAffiliationComponent factionComp =
+            FactionAffiliationComponent.Cast(
+                group.FindComponent(FactionAffiliationComponent));
+        if (factionComp)
+        {
+            Faction f = factionComp.GetAffiliatedFaction();
+            if (f)
+            {
+                string fKey = f.GetFactionKey();
+                if (fKey == "US") return "us";
+                if (fKey == "USSR") return "ussr";
+                if (fKey == "FIA") return "fia";
+                return fKey;
+            }
+        }
+
+        // Fallback: infer from prefab name
+        if (group.GetPrefabData())
+        {
+            string prefabName = group.GetPrefabData().GetPrefabName();
+            if (prefabName.Contains("USSR") || prefabName.Contains("OPFOR"))
+                return "ussr";
+            if (prefabName.Contains("US") || prefabName.Contains("BLUFOR"))
+                return "us";
+            if (prefabName.Contains("FIA") || prefabName.Contains("INDFOR"))
+                return "fia";
+        }
+
+        return "ussr"; // default assumption for enemy spawns
+    }
+
+    // Calculate average health across all agents in the group
+    protected float CalculateGroupHealth(SCR_AIGroup group)
+    {
+        if (!group) return 0.0;
+
+        array<AIAgent> agents = {};
+        group.GetAgents(agents);
+
+        if (agents.Count() == 0) return 0.0;
+
+        float totalHealth = 0;
+        int validAgents = 0;
+
+        foreach (AIAgent agent : agents)
+        {
+            if (!agent) continue;
+            IEntity agentEntity = agent.GetControlledEntity();
+            if (!agentEntity) continue;
+
+            SCR_CharacterDamageManagerComponent dmg =
+                SCR_CharacterDamageManagerComponent.Cast(
+                    agentEntity.FindComponent(SCR_CharacterDamageManagerComponent));
+            if (dmg)
+            {
+                totalHealth += dmg.GetHealthScaled();
+            }
+            else
+            {
+                totalHealth += 1.0; // assume full health if no damage component
+            }
+            validAgents++;
+        }
+
+        if (validAgents == 0) return 0.0;
+        return totalHealth / validAgents;
     }
 
     ref array<ref GM_ContactReport> GetContactReports()
@@ -710,6 +968,70 @@ class GM_SquadManager
         return group;
     }
 
+    // Find a position on dry land — if the given position is underwater, search outward
+    protected vector FindDryLandPosition(vector position)
+    {
+        float surfaceY = GetGame().GetWorld().GetSurfaceY(position[0], position[2]);
+
+        // If terrain is above 1m elevation, it's land — use as-is
+        if (surfaceY >= 1.0)
+            return position;
+
+        Print("[GodMode:Squad] Position " + position.ToString(false) + " is underwater (Y=" + surfaceY + ") — searching for land", LogLevel.WARNING);
+
+        // Search in expanding circles for dry land
+        for (int ring = 1; ring <= 8; ring++)
+        {
+            float searchDist = ring * 100; // 100m, 200m, 300m, ...
+            for (int dir = 0; dir < 8; dir++)
+            {
+                float angle = dir * 45 * Math.DEG2RAD;
+                vector tryPos = position;
+                tryPos[0] = tryPos[0] + Math.Cos(angle) * searchDist;
+                tryPos[2] = tryPos[2] + Math.Sin(angle) * searchDist;
+                float tryY = GetGame().GetWorld().GetSurfaceY(tryPos[0], tryPos[2]);
+                if (tryY >= 1.0)
+                {
+                    Print("[GodMode:Squad] Found dry land at " + tryPos.ToString(false) + " (Y=" + tryY + ", dist=" + searchDist + "m)");
+                    tryPos[1] = tryY;
+                    return tryPos;
+                }
+            }
+        }
+
+        // Last resort: try to find nearest player and spawn near them (they're on land)
+        array<int> playerIds = {};
+        GetGame().GetPlayerManager().GetPlayers(playerIds);
+        foreach (int pid : playerIds)
+        {
+            IEntity playerEnt = GetGame().GetPlayerManager().GetPlayerControlledEntity(pid);
+            if (!playerEnt) continue;
+            vector playerPos = playerEnt.GetOrigin();
+            float pY = GetGame().GetWorld().GetSurfaceY(playerPos[0], playerPos[2]);
+            if (pY >= 1.0)
+            {
+                // Spawn 100-200m from the player in a random direction on land
+                for (int a = 0; a < 8; a++)
+                {
+                    float pAngle = a * 45 * Math.DEG2RAD;
+                    vector nearPlayer = playerPos;
+                    nearPlayer[0] = nearPlayer[0] + Math.Cos(pAngle) * 150;
+                    nearPlayer[2] = nearPlayer[2] + Math.Sin(pAngle) * 150;
+                    float npY = GetGame().GetWorld().GetSurfaceY(nearPlayer[0], nearPlayer[2]);
+                    if (npY >= 1.0)
+                    {
+                        Print("[GodMode:Squad] Using position near player as fallback: " + nearPlayer.ToString(false));
+                        nearPlayer[1] = npY;
+                        return nearPlayer;
+                    }
+                }
+            }
+        }
+
+        Print("[GodMode:Squad] WARNING: Could not find dry land — using original position", LogLevel.WARNING);
+        return position;
+    }
+
     protected AIWaypoint SpawnWaypoint(ResourceName prefab, vector position)
     {
         Resource res = Resource.Load(prefab);
@@ -721,7 +1043,9 @@ class GM_SquadManager
 
         EntitySpawnParams params = new EntitySpawnParams();
         params.TransformMode = ETransformMode.WORLD;
-        params.Transform[3] = position;
+        vector waypointPos = position;
+        waypointPos[1] = GetGame().GetWorld().GetSurfaceY(position[0], position[2]);
+        params.Transform[3] = waypointPos;
 
         IEntity ent = GetGame().SpawnEntityPrefab(res, GetGame().GetWorld(), params);
         return AIWaypoint.Cast(ent);
@@ -730,84 +1054,226 @@ class GM_SquadManager
     int GetSquadCount() { return m_mSquads.Count(); }
     void SetMaxSquads(int max) { m_iMaxSquads = max; }
 
+    // Public accessor for group lookup (used by GM_GodModeComponent for compound maneuvers)
+    SCR_AIGroup GetGroupPublic(string squadId) { return GetGroup(squadId); }
+
     // ═══════════════════════════════════════════════
     // Prefab Lookup
     // ═══════════════════════════════════════════════
     // NOTE: Verify GUIDs in Workbench Resource Browser for your game version.
 
-    protected ResourceName GetGroupPrefab(string type)
+    protected ResourceName GetFallbackPrefab(string grpType)
     {
-        switch (type)
-        {
-            // ── US Squads ──
-            case "us_rifle_squad":
-                return "{84ED40B0AE3B9E51}Prefabs/Groups/BLUFOR/Group_US_RifleSquad.et";
-            case "us_fire_team":
-                return "{6240B9613DB5CB64}Prefabs/Groups/BLUFOR/Group_US_FireTeam.et";
-            case "us_mg_team":
-                return "{F2C0CF43B06ED63E}Prefabs/Groups/BLUFOR/Group_US_MachineGunTeam.et";
-            case "us_at_team":
-                return "{BB1CB7E7B0AE7E53}Prefabs/Groups/BLUFOR/Group_US_AntiTankTeam.et";
-            case "us_sniper_team":
-                return "{3EB8B66F7A975CC2}Prefabs/Groups/BLUFOR/Group_US_SniperTeam.et";
+        // Map failed prefabs to known-working alternatives (verified v1.6.0 GUIDs)
+        if (grpType.Contains("ussr") || grpType.Contains("opfor"))
+            return "{E552DABF3636C2AD}Prefabs/Groups/OPFOR/Group_USSR_RifleSquad.et";
+        if (grpType.Contains("us") || grpType.Contains("blufor"))
+            return "{DDF3799FA1387848}Prefabs/Groups/BLUFOR/Group_US_RifleSquad.et";
+        if (grpType.Contains("fia"))
+            return "{C02F81D15E9D8B85}Prefabs/Groups/INDFOR/Group_FIA_RifleSquad.et";
+        // Default to USSR rifle squad
+        return "{E552DABF3636C2AD}Prefabs/Groups/OPFOR/Group_USSR_RifleSquad.et";
+    }
 
-            // ── USSR Squads ──
+    protected string GetFallbackType(string grpType)
+    {
+        if (grpType.Contains("ussr") || grpType.Contains("opfor"))
+            return "ussr_rifle_squad";
+        if (grpType.Contains("us") || grpType.Contains("blufor"))
+            return "us_rifle_squad";
+        if (grpType.Contains("fia"))
+            return "fia_squad";
+        return "ussr_rifle_squad";
+    }
+
+    protected ResourceName GetGroupPrefab(string grpType)
+    {
+        switch (grpType)
+        {
+            // ── US Squads (verified GUIDs v1.6.0) ──
+            case "us_rifle_squad":
+                return "{DDF3799FA1387848}Prefabs/Groups/BLUFOR/Group_US_RifleSquad.et";
+            case "us_fire_team":
+                return "{84E5BBAB25EA23E5}Prefabs/Groups/BLUFOR/Group_US_FireTeam.et";
+            case "us_light_fire_team":
+                return "{FCF7F5DC4F83955C}Prefabs/Groups/BLUFOR/Group_US_LightFireTeam.et";
+            case "us_mg_team":
+                return "{958039B857396B7B}Prefabs/Groups/BLUFOR/Group_US_MachineGunTeam.et";
+            case "us_at_team":
+                return "{FAEA8B9E1252F56E}Prefabs/Groups/BLUFOR/Group_US_Team_LAT.et";
+            case "us_sniper_team":
+                return "{D807C7047E818488}Prefabs/Groups/BLUFOR/Group_US_SniperTeam.et";
+            case "us_recon_team":
+                return "{F65B7BB712F46FEE}Prefabs/Groups/BLUFOR/Group_US_ReconTeam.et";
+            case "us_sentry_team":
+                return "{3BF36BDEEB33AEC9}Prefabs/Groups/BLUFOR/Group_US_SentryTeam.et";
+            case "us_engineer_squad":
+                return "{6B2A6EE5002D200F}Prefabs/Groups/BLUFOR/Group_US_EngineerTeam.et";
+            case "us_grenadier_team":
+                return "{DE747BC9217D383C}Prefabs/Groups/BLUFOR/Group_US_Team_GL.et";
+
+            // ── USSR Squads (verified GUIDs v1.6.0) ──
             case "ussr_rifle_squad":
                 return "{E552DABF3636C2AD}Prefabs/Groups/OPFOR/Group_USSR_RifleSquad.et";
             case "ussr_fire_team":
-                return "{A33FCB57E82D063C}Prefabs/Groups/OPFOR/Group_USSR_FireTeam.et";
+                return "{657590C1EC9E27D3}Prefabs/Groups/OPFOR/Group_USSR_LightFireTeam.et";
+            case "ussr_fire_group":
+                return "{30ED11AA4F0D41E5}Prefabs/Groups/OPFOR/Group_USSR_FireGroup.et";
             case "ussr_mg_team":
-                return "{1A6EC0F7F9F48F34}Prefabs/Groups/OPFOR/Group_USSR_MachineGunTeam.et";
+                return "{A2F75E45C66B1C0A}Prefabs/Groups/OPFOR/Group_USSR_MachineGunTeam.et";
             case "ussr_at_team":
-                return "{07C1D8EE7FDBBAEE}Prefabs/Groups/OPFOR/Group_USSR_AntiTankTeam.et";
+            case "ussr_rpg_team":
+                return "{96BAB56E6558788E}Prefabs/Groups/OPFOR/Group_USSR_Team_AT.et";
+            case "ussr_lat_team":
+                return "{2E59ECDA9ED0B993}Prefabs/Groups/OPFOR/Group_USSR_Team_LAT.et";
             case "ussr_sniper_team":
-                return "{55C46EC94DD16E3A}Prefabs/Groups/OPFOR/Group_USSR_SniperTeam.et";
+            case "ussr_recon_team":
+                return "{06F0C9675883F18A}Prefabs/Groups/OPFOR/KLMK/Group_USSR_ReconTeam.et";
+            case "ussr_sentry_team":
+                return "{CB58D90EA14430AD}Prefabs/Groups/OPFOR/Group_USSR_SentryTeam.et";
+            case "ussr_grenadier_team":
+                return "{43C7A28EEB660FF8}Prefabs/Groups/OPFOR/Group_USSR_Team_GL.et";
+            case "ussr_suppress_team":
+                return "{1C0502B5729E7231}Prefabs/Groups/OPFOR/Group_USSR_Team_Suppress.et";
+            case "ussr_engineer_squad":
+                return "{344B4B6F787CFB23}Prefabs/Groups/OPFOR/Group_USSR_EngineerTeam.et";
+            case "ussr_maneuver_group":
+                return "{1A5F0D93609DA5DA}Prefabs/Groups/OPFOR/Group_USSR_ManeuverGroup.et";
 
             // ── FIA ──
             case "fia_squad":
                 return "{C02F81D15E9D8B85}Prefabs/Groups/INDFOR/Group_FIA_RifleSquad.et";
 
-            // ── US Extended ──
-            case "us_recon_team":
-                return "{E552DABF3636C2AD}Prefabs/Groups/BLUFOR/Group_US_FireTeam.et"; // verify GUID
+            // ── Unsupported aliases ──
             case "us_mortar_team":
-                return "{E552DABF3636C2AD}Prefabs/Groups/BLUFOR/Group_US_FireTeam.et"; // verify GUID
-            case "us_engineer_squad":
-                return "{E552DABF3636C2AD}Prefabs/Groups/BLUFOR/Group_US_FireTeam.et"; // verify GUID
             case "us_hq_element":
-                return "{E552DABF3636C2AD}Prefabs/Groups/BLUFOR/Group_US_FireTeam.et"; // verify GUID
             case "us_medic_team":
-                return "{E552DABF3636C2AD}Prefabs/Groups/BLUFOR/Group_US_FireTeam.et"; // verify GUID
             case "us_fist_team":
-                return "{E552DABF3636C2AD}Prefabs/Groups/BLUFOR/Group_US_FireTeam.et"; // verify GUID
-
-            // ── USSR Extended ──
-            case "ussr_recon_team":
-                return "{DA2F6BE0AAFA4D0E}Prefabs/Groups/OPFOR/Group_USSR_FireTeam.et"; // verify GUID
             case "ussr_mortar_team":
-                return "{DA2F6BE0AAFA4D0E}Prefabs/Groups/OPFOR/Group_USSR_FireTeam.et"; // verify GUID
-            case "ussr_engineer_squad":
-                return "{DA2F6BE0AAFA4D0E}Prefabs/Groups/OPFOR/Group_USSR_FireTeam.et"; // verify GUID
             case "ussr_hq_element":
-                return "{DA2F6BE0AAFA4D0E}Prefabs/Groups/OPFOR/Group_USSR_FireTeam.et"; // verify GUID
             case "ussr_medic_team":
-                return "{DA2F6BE0AAFA4D0E}Prefabs/Groups/OPFOR/Group_USSR_FireTeam.et"; // verify GUID
-            case "ussr_rpg_team":
-                return "{DA2F6BE0AAFA4D0E}Prefabs/Groups/OPFOR/Group_USSR_FireTeam.et"; // verify GUID
-
-            // ── FIA Extended ──
             case "fia_recon_cell":
-                return "{F20B335E6C1F8E90}Prefabs/Groups/INDFOR/Group_FIA_SentryTeam.et"; // verify GUID
             case "fia_sapper_cell":
-                return "{F20B335E6C1F8E90}Prefabs/Groups/INDFOR/Group_FIA_SentryTeam.et"; // verify GUID
             case "fia_mortar_crew":
-                return "{F20B335E6C1F8E90}Prefabs/Groups/INDFOR/Group_FIA_SentryTeam.et"; // verify GUID
             case "fia_technical":
-                return "{F20B335E6C1F8E90}Prefabs/Groups/INDFOR/Group_FIA_SentryTeam.et"; // verify GUID
+                Print("[GodMode:Squad] Unsupported group type: '" + grpType + "' — no verified prefab is configured for this alias", LogLevel.WARNING);
+                return "";
 
             default:
-                Print("[GodMode:Squad] Unknown group type: " + type + ", defaulting to USSR rifle squad", LogLevel.WARNING);
-                return "{E552DABF3636C2AD}Prefabs/Groups/OPFOR/Group_USSR_RifleSquad.et";
+                Print("[GodMode:Squad] Unknown group type: " + grpType, LogLevel.WARNING);
+                return "";
         }
+
+        return "";
+    }
+
+    // ═══════════════════════════════════════════════
+    // Manual Soldier Population (fallback when formation system fails)
+    // ═══════════════════════════════════════════════
+
+    protected int GetDesiredSquadSize(string groupType)
+    {
+        if (groupType.Contains("fire_team") || groupType.Contains("light"))
+            return 4;
+        if (groupType.Contains("mg_team") || groupType.Contains("at_team") ||
+            groupType.Contains("sniper") || groupType.Contains("recon") ||
+            groupType.Contains("sentry") || groupType.Contains("grenadier") ||
+            groupType.Contains("suppress") || groupType.Contains("lat"))
+            return 4;
+        if (groupType.Contains("rifle_squad") || groupType.Contains("maneuver") ||
+            groupType.Contains("fire_group"))
+            return 8;
+        return 6;
+    }
+
+    protected ResourceName GetSoldierPrefab(string groupType)
+    {
+        // Determine faction from group type and return appropriate soldier prefab
+        if (groupType.Contains("us_"))
+            return "{26A9756790131354}Prefabs/Characters/Factions/BLUFOR/US_Army/Character_US_Rifleman.et";
+
+        // Default to USSR
+        return "{DCB41B3746FDD1BE}Prefabs/Characters/Factions/OPFOR/USSR_Army/Character_USSR_Rifleman.et";
+    }
+
+    protected void ManuallyPopulateGroup(SCR_AIGroup group, string groupType, vector position, int count)
+    {
+        if (!group || count <= 0) return;
+
+        ResourceName soldierPrefab = GetSoldierPrefab(groupType);
+        Resource soldierRes = Resource.Load(soldierPrefab);
+        if (!soldierRes || !soldierRes.IsValid())
+        {
+            Print("[GodMode:Squad] Failed to load soldier prefab: " + soldierPrefab, LogLevel.ERROR);
+            return;
+        }
+
+        int spawned = 0;
+        for (int i = 0; i < count; i++)
+        {
+            // Spread soldiers in a wider circle to avoid clipping into each other or terrain
+            float angle = i * (360.0 / count) * Math.DEG2RAD;
+            float spreadRadius = 10.0; // 10m spread to avoid stacking
+            vector soldierPos = position;
+            soldierPos[0] = soldierPos[0] + Math.Cos(angle) * spreadRadius;
+            soldierPos[2] = soldierPos[2] + Math.Sin(angle) * spreadRadius;
+            // Add 0.5m height offset to prevent spawning inside terrain
+            soldierPos[1] = GetGame().GetWorld().GetSurfaceY(soldierPos[0], soldierPos[2]) + 0.5;
+
+            EntitySpawnParams soldierParams = new EntitySpawnParams();
+            soldierParams.TransformMode = ETransformMode.WORLD;
+            soldierParams.Transform[3] = soldierPos;
+
+            IEntity soldier = GetGame().SpawnEntityPrefab(soldierRes, GetGame().GetWorld(), soldierParams);
+            if (!soldier)
+            {
+                Print("[GodMode:Squad] Failed to spawn soldier entity " + i, LogLevel.WARNING);
+                continue;
+            }
+
+            // Check if soldier has health (is actually alive)
+            SCR_CharacterDamageManagerComponent dmg =
+                SCR_CharacterDamageManagerComponent.Cast(
+                    soldier.FindComponent(SCR_CharacterDamageManagerComponent));
+            if (dmg)
+            {
+                float hp = dmg.GetHealthScaled();
+                if (hp <= 0)
+                {
+                    Print("[GodMode:Squad] Soldier spawned dead (hp=" + hp + ") — retrying at offset", LogLevel.WARNING);
+                    SCR_EntityHelper.DeleteEntityAndChildren(soldier);
+                    // Retry with more offset
+                    soldierPos[0] = soldierPos[0] + 3;
+                    soldierPos[1] = GetGame().GetWorld().GetSurfaceY(soldierPos[0], soldierPos[2]) + 1.0;
+                    soldierParams.Transform[3] = soldierPos;
+                    soldier = GetGame().SpawnEntityPrefab(soldierRes, GetGame().GetWorld(), soldierParams);
+                    if (!soldier) continue;
+                }
+            }
+
+            // Add the soldier to the AI group
+            AIAgent agent = AIAgent.Cast(soldier.FindComponent(AIAgent));
+            if (!agent)
+            {
+                // Try getting the AIControlComponent which manages the agent
+                AIControlComponent aiCtrl = AIControlComponent.Cast(soldier.FindComponent(AIControlComponent));
+                if (aiCtrl)
+                    agent = aiCtrl.GetAIAgent();
+            }
+
+            if (agent)
+            {
+                group.AddAgent(agent);
+                spawned++;
+                Print("[GodMode:Squad] Soldier " + i + " alive at " + soldierPos.ToString(false));
+            }
+            else
+            {
+                Print("[GodMode:Squad] Soldier has no AI agent — deleting", LogLevel.WARNING);
+                SCR_EntityHelper.DeleteEntityAndChildren(soldier);
+            }
+        }
+
+        Print("[GodMode:Squad] Manually populated: " + spawned + "/" + count + " soldiers added to group");
     }
 }

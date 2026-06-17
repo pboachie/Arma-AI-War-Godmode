@@ -1,4 +1,33 @@
+# ─────────────────────────────────────────────
+# Secrets & environment
+# ─────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+*.secret
+*.cert
+
+# ─────────────────────────────────────────────
+# Arma Reforger dedicated server (binaries, game data, leaked configs)
+# Ship your own — see docs/SERVER_SETUP.md
+# ─────────────────────────────────────────────
+Arma Reforger Server/
+arma_reforger/
+steamcmd/
+battleye/
+saves/
+
+# Generated server config (rendered from the template — may contain passwords)
+**/configs/config.json
+
+# ─────────────────────────────────────────────
 # Python
+# ─────────────────────────────────────────────
 __pycache__/
 *.pyc
 .venv/
@@ -6,32 +35,57 @@ venv/
 *.egg-info/
 .pytest_cache/
 
-# Environment (contains API keys)
-.env
-!.env.example
-
-# IDE
+# ─────────────────────────────────────────────
+# Editor / tooling local state
+# ─────────────────────────────────────────────
 .vscode/
 .idea/
+.claude/
 
+# ─────────────────────────────────────────────
 # OS
+# ─────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# Arma Reforger build artifacts
+# ─────────────────────────────────────────────
+# Arma Reforger build artifacts & third-party addons
+# ─────────────────────────────────────────────
 *.ebo
 *.log
+*.pak
+*.rdb
+# Compiled / downloaded addons (build output, third-party content)
+addons/
+**/addons/
 
-# Arma Reforger Server - ignore binaries but keep configs
-Arma Reforger Server/
-!Arma Reforger Server/configs/
-!Arma Reforger Server/configs/**
-
-# Middleware runtime data
+# ─────────────────────────────────────────────
+# Middleware runtime data (generated at runtime)
+# ─────────────────────────────────────────────
 battle_history/
+battle_summaries/
 replays/
+logs/
 middleware/battle_history/
+middleware/battle_summaries/
 middleware/replays/
+middleware/logs/
+middleware/campaign_state.json
+middleware/guidList.txt
+middleware/logs.txt
+middleware/last_invalid_*.bin
+*.jsonl
+*.jsonl.gz
 
-# Docker
+# ─────────────────────────────────────────────
+# Installers / large binaries
+# ─────────────────────────────────────────────
+*.exe
+*.zip
+*.7z
+Install_Longbow_*
+
+# ─────────────────────────────────────────────
+# Misc
+# ─────────────────────────────────────────────
 *.pid

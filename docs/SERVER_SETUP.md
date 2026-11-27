@@ -38,7 +38,7 @@ fi
 chmod 0600 "$arma_private/arma.env"
 ```
 
-Edit `"$arma_private/arma.env"` directly in a private editor. Set `ARMA_ADMIN_PASSWORD` to a unique, password-manager-generated value of 20–128 printable ASCII characters with no spaces. Optionally set `ARMA_GAME_PASSWORD` to require a different password of the same strength to join. Use one `ARMA_*` assignment per line. Values can be unquoted or wrapped in single or double quotes and are read literally. Don't source the file as a shell script. Exported environment variables override file entries, so clear stale exports before generating.
+Edit `"$arma_private/arma.env"` directly in a private editor. Set `ARMA_ADMIN_PASSWORD` to a unique, password-manager-generated value of 20–32 printable ASCII characters with no spaces. Optionally set `ARMA_GAME_PASSWORD` to require a different 20–32 character password to join. Reforger's server schema rejects either password above 32 characters. Use one `ARMA_*` assignment per line. Values can be unquoted or wrapped in single or double quotes and are read literally. Don't source the file as a shell script. Exported environment variables override file entries, so clear stale exports before generating.
 
 ```bash
 python3 scripts/generate_config.py --env-file "$arma_private/arma.env" --output "$arma_private/config.json"

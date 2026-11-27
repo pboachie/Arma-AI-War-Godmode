@@ -2,14 +2,14 @@
 # Runs both the game server and AI middleware in a single container via supervisord.
 
 # ── Stage 1: Build Python dependencies ──
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim@sha256:191083cdf6c7bda8c76158983163ead5d5cf7b77cf3033e805bb0f5296f51b4b AS builder
 
 WORKDIR /build
 COPY middleware/requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN pip install --no-cache-dir --require-hashes --only-binary=:all: --prefix=/install -r requirements.txt
 
 # ── Stage 2: Runtime (python:3.12-slim already has glibc 2.38 + Python 3.12) ──
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:191083cdf6c7bda8c76158983163ead5d5cf7b77cf3033e805bb0f5296f51b4b
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -48,7 +48,7 @@ RUN mkdir -p \
     /app/battle_summaries
 
 # Install SteamCMD
-RUN wget -qO /tmp/steamcmd_linux.tar.gz \
+RUN wget --https-only -qO /tmp/steamcmd_linux.tar.gz \
         https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz && \
     tar -xzf /tmp/steamcmd_linux.tar.gz -C /home/reforger/steamcmd && \
     rm /tmp/steamcmd_linux.tar.gz
@@ -66,6 +66,7 @@ COPY middleware/server_manager.py* /app/
 COPY middleware/rcon_client.py* /app/
 COPY middleware/a2s_client.py* /app/
 COPY middleware/auth.py* /app/
+COPY middleware/tactical_objectives.py /app/
 
 # Copy supervisor config
 COPY docker/supervisord.conf /etc/supervisor/conf.d/godmode.conf
@@ -73,8 +74,8 @@ COPY docker/supervisord.conf /etc/supervisor/conf.d/godmode.conf
 # Fix ownership
 RUN chown -R reforger:reforger /home/reforger /app
 
-# Expose ports: game (UDP) + A2S (UDP) + RCON (UDP) + middleware (TCP)
-EXPOSE 2001/udp 17777/udp 19999/udp 8000
+# Image metadata only. The legacy stack does not publish RCON or A2S.
+EXPOSE 2001/udp 8000
 
 USER reforger
 WORKDIR /home/reforger

@@ -1,0 +1,45 @@
+name: Middleware checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+      - name: Test config and runtime without live services
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r middleware/requirements.txt
+          python -m pip install pytest
+          python -m pip check
+          python -m unittest discover -s tests
+          python -m pytest -q middleware/test_runtime_security.py
+          for script in scripts/bootstrap-vps.sh scripts/install-vps.sh middleware/start.sh scripts/stop.sh; do
+            bash -n "$script"
+          done
+      - name: Install on the runner and confirm the private defaults
+        run: |
+          chmod 0600 middleware/server.py middleware/dashboard.html
+          bash scripts/install-vps.sh
+          test "$(docker compose --env-file middleware/.env port middleware 8000)" = '127.0.0.1:8080'
+          test "$(curl -fsS http://127.0.0.1:8080/health)" = '{"status":"ok"}'
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/health)" = 401
+          docker compose --env-file middleware/.env exec -T middleware python -c 'import os; assert os.getuid() == 10001 and os.environ["GODMODE_RECORD_REPLAYS"] == "false"'
+      - name: Stop the isolated test stack
+        if: always()
+        run: |
+          if [ -f middleware/.env ]; then
+            docker compose --env-file middleware/.env logs --tail=50 middleware
+            docker compose --env-file middleware/.env down --volumes
+          fi

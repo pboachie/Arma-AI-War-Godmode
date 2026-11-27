@@ -7,12 +7,10 @@ import json
 import logging
 import os
 import re
-import subprocess
 import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
 log = logging.getLogger(__name__)
@@ -25,13 +23,7 @@ _rcon_client = None     # BERconClient | None
 _a2s_client = None      # A2SQueryClient | None
 
 
-# ─── Pydantic Models ───
-
-class RconRequest(BaseModel):
-    command: str
-
-
-# ─── Helper ───
+# ─── Helpers ───
 
 def _require_service(service, name: str):
     """Raise 503 if a service is not configured."""
@@ -49,11 +41,13 @@ async def _lifecycle_action(action_name: str):
     """Run a server_manager lifecycle action (start/stop/restart)."""
     _require_service(_server_manager, "server_manager")
     try:
-        await getattr(_server_manager, action_name)()
-        return {"status": _LIFECYCLE_PAST_TENSE[action_name]}
+        succeeded = await getattr(_server_manager, action_name)()
     except Exception as e:
         log.error("Failed to %s server: %s", action_name, e)
-        raise HTTPException(status_code=500, detail=str(e))
+        succeeded = False
+    if not succeeded:
+        raise HTTPException(status_code=503, detail=f"Could not {action_name} server")
+    return {"status": _LIFECYCLE_PAST_TENSE[action_name]}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -119,20 +113,6 @@ async def server_stop():
 async def server_restart():
     """Restart the Arma Reforger game server."""
     return await _lifecycle_action("restart")
-
-
-@router.post("/rcon")
-async def server_rcon(body: RconRequest):
-    """Send an RCON command to the game server."""
-    _require_service(_rcon_client, "rcon_client")
-    try:
-        if not _rcon_client.is_connected:
-            await _rcon_client.connect()
-        response = await _rcon_client.send_command(body.command)
-        return {"response": response, "success": True}
-    except Exception as e:
-        log.error("RCON command failed: %s", e)
-        return {"response": str(e), "success": False}
 
 
 @router.get("/players")
@@ -446,42 +426,29 @@ async def server_metrics():
 # Lifecycle
 # ═══════════════════════════════════════════════════════════
 
-async def init_services():
+async def init_services(*, server_control_enabled: bool = False, rcon_client=None):
     """Initialize server management services. Called on middleware startup."""
     global _server_manager, _rcon_client, _a2s_client
 
-    # Server manager
-    try:
-        from server_manager import create_server_manager
-        _server_manager = create_server_manager()
-        if not _server_manager._process_mode:
-            await _server_manager._ensure_docker_check()
-        await _server_manager.start_monitor()
-        log.info("Server manager initialized")
-    except ImportError:
-        log.warning("server_manager not available")
-    except Exception as e:
-        log.warning("server_manager init failed: %s", e)
-
-    # RCON client — try to connect at startup, falls back to on-demand
-    try:
-        from rcon_client import create_rcon_client
-        _rcon_client = create_rcon_client()
-        log.info("RCON client created, attempting initial connection...")
+    # Standalone middleware must not probe Docker or control a server process.
+    if server_control_enabled:
         try:
-            connected = await _rcon_client.connect()
-            if connected:
-                log.info("RCON client connected at startup")
-            else:
-                log.warning("RCON initial connection failed (will retry on demand)")
+            from server_manager import create_server_manager
+            manager = create_server_manager()
+            if not manager._process_mode:
+                await manager._ensure_docker_check()
+            await manager.start_monitor()
+            _server_manager = manager
+            log.info("Server manager initialized")
+        except ImportError:
+            log.warning("server_manager not available")
         except Exception as e:
-            log.warning("RCON initial connection error (will retry on demand): %s", e)
-    except ImportError:
-        log.warning("rcon_client not available")
-    except Exception as e:
-        log.warning("RCON client not available: %s", e)
+            log.warning("server_manager init failed: %s", e)
+    else:
+        log.info("Server process control disabled")
 
-    # Link RCON connectivity to server manager for fallback status detection
+    # server.py owns the single explicitly opted-in RCON connection.
+    _rcon_client = rcon_client
     if _server_manager is not None and _rcon_client is not None:
         _server_manager._rcon_connected_fn = lambda: _rcon_client.is_connected
 
@@ -498,17 +465,11 @@ async def init_services():
 
 async def shutdown_services():
     """Cleanup on middleware shutdown."""
-    if _rcon_client is not None:
-        try:
-            if _rcon_client.is_connected:
-                await _rcon_client.disconnect()
-                log.info("RCON client disconnected")
-        except Exception as e:
-            log.warning("RCON disconnect error: %s", e)
-
+    global _server_manager, _rcon_client, _a2s_client
     if _server_manager is not None:
         try:
             await _server_manager.stop_monitor()
             log.info("Server manager stopped")
         except Exception as e:
             log.warning("Server manager stop error: %s", e)
+    _server_manager = _rcon_client = _a2s_client = None

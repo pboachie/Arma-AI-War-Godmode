@@ -11,6 +11,8 @@
 *.key
 *.secret
 *.cert
+godmode_api_key.txt
+arma.env
 
 # ─────────────────────────────────────────────
 # Arma Reforger dedicated server (binaries, game data, leaked configs)
@@ -71,6 +73,8 @@ middleware/battle_summaries/
 middleware/replays/
 middleware/logs/
 middleware/campaign_state.json
+middleware/campaign_state.json.tmp
+.godmode-state-*
 middleware/guidList.txt
 middleware/logs.txt
 middleware/last_invalid_*.bin

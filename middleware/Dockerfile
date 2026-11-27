@@ -1,49 +1,27 @@
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim@sha256:191083cdf6c7bda8c76158983163ead5d5cf7b77cf3033e805bb0f5296f51b4b AS builder
 
 WORKDIR /build
 COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN pip install --no-cache-dir --require-hashes --only-binary=:all: --prefix=/install -r requirements.txt
 
-# ── Production stage ──
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:191083cdf6c7bda8c76158983163ead5d5cf7b77cf3033e805bb0f5296f51b4b
 
-# Install curl for healthcheck and create non-root user
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd -r godmode && useradd -r -g godmode -s /sbin/nologin godmode
+RUN groupadd --gid 10001 godmode \
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin godmode \
+    && install -d -m 0700 -o godmode -g godmode /var/lib/godmode
 
 COPY --from=builder /install /usr/local
-
 WORKDIR /app
+# Keep the non-root reader independent of the operator's checkout umask.
+COPY --chmod=0444 server.py agents.py scaling_engine.py tactical_objectives.py auth.py dashboard.html \
+     server_integration.py server_manager.py rcon_client.py a2s_client.py ./
 
-COPY server.py .
-COPY agents.py .
-COPY dashboard.html .
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    GODMODE_STATE_DIR=/var/lib/godmode
 
-# Copy optional files only if they exist
-COPY scaling_engine.py* ./
-COPY server_integration.py* ./
-COPY server_manager.py* ./
-COPY rcon_client.py* ./
-COPY a2s_client.py* ./
-COPY auth.py* ./
-COPY test_server.py* ./
-COPY test_server_integration.py* ./
+USER 10001:10001
+EXPOSE 8000/tcp
 
-# Ensure replay/log directories exist and are writable
-RUN mkdir -p /app/replays /app/logs /app/battle_summaries \
-    && chown -R godmode:godmode /app
-
-USER godmode
-
-EXPOSE 8000
-
-# Hypercorn for production:
-# - Supports h2c (HTTP/2 cleartext) which Enfusion's RestContext requires
-# - Single worker (LLM calls are async, multiple workers waste memory)
-# - Graceful shutdown timeout for in-flight LLM calls
-CMD ["hypercorn", "server:app", \
-     "--bind", "0.0.0.0:8000", \
-     "--graceful-timeout", "30", \
-     "--access-log", "-"]
+# Hypercorn also supports the cleartext HTTP/2 used by the game client.
+CMD ["hypercorn", "server:app", "--bind", "0.0.0.0:8000", "--graceful-timeout", "30"]

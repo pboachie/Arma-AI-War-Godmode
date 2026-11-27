@@ -5,8 +5,10 @@ umask 077
 
 usage() {
     printf '%s\n' \
-        'Usage: bash scripts/install-vps.sh' \
+        'Usage: bash scripts/install-vps.sh [--stop | --adopt-existing-state]' \
         'Run from a checkout you trust. This also works from a pinned checkout.' \
+        '--stop stops only this checkout’s middleware. It leaves state intact.' \
+        '--adopt-existing-state claims an unowned older volume using your existing private settings.' \
         'Requires Linux, a local Docker Engine 28+ (Unix socket), Docker Compose v2+' \
         'with up --wait support, and enough disk for the image and middleware state.' \
         'This starts only the middleware. It does not install Docker or the game,' \
@@ -22,7 +24,13 @@ if [[ $# -eq 1 && $1 == --help ]]; then
     usage
     exit 0
 fi
-[[ $# -eq 0 ]] || die 'No arguments expected. Use --help for prerequisites.'
+operation=start
+case ${1:-} in
+    '') [[ $# -eq 0 ]] || die 'Use --help for options.' ;;
+    --stop) [[ $# -eq 1 ]] || die 'Use --stop by itself.'; operation=stop ;;
+    --adopt-existing-state) [[ $# -eq 1 ]] || die 'Use --adopt-existing-state by itself.'; operation=adopt ;;
+    *) die 'Use --help for options.' ;;
+esac
 [[ $(uname -s) == Linux ]] || die 'Run this installer on a Linux VPS.'
 
 root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -72,9 +80,14 @@ fi
 compose_help=$(docker_cli compose up --help 2>/dev/null) || die 'Cannot check the Docker Compose plugin.'
 [[ $compose_help == *--wait-timeout* ]] || die 'Update Docker Compose to a version that supports up --wait-timeout.'
 
-# The public stack intentionally uses one stable volume/project name per Docker
-# host. Do not recreate an existing stack from a different checkout.
-existing_dirs=$(docker_cli ps --all --filter 'label=com.docker.compose.project=godmode-middleware' \
+# The public stack uses one stable project per Docker host. Keep a separate
+# ownership marker so removing containers never drops the ownership check.
+project=godmode-middleware
+state_volume=${project}_middleware-state
+owner_volume=${project}-ownership
+owner_id=$(printf '%s' "$root" | sha256sum)
+owner_id=${owner_id%% *}
+existing_dirs=$(docker_cli ps --all --filter "label=com.docker.compose.project=$project" \
     --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null) \
     || die 'Cannot check for an existing middleware installation.'
 if [[ -n $existing_dirs ]]; then
@@ -83,12 +96,26 @@ if [[ -n $existing_dirs ]]; then
     done <<< "$existing_dirs"
 fi
 
+existing_volumes=$(docker_cli volume ls --format '{{.Name}}' 2>/dev/null) || die 'Cannot check deployment volumes.'
+has_volume() { [[ $'\n'"$existing_volumes"$'\n' == *$'\n'"$1"$'\n'* ]]; }
+verify_owner() {
+    local found
+    found=$(docker_cli volume inspect --format '{{index .Labels "io.godmode.checkout-sha"}}' "$owner_volume" 2>/dev/null) \
+        || die 'Cannot inspect middleware deployment ownership.'
+    [[ $found == "$owner_id" ]] || die 'The middleware state belongs to another checkout. Use its original checkout.'
+}
+if has_volume "$owner_volume"; then
+    verify_owner
+elif has_volume "$state_volume" && [[ -z $existing_dirs && $operation == start ]]; then
+    die 'Existing middleware state has no checkout owner. From its intended checkout, use --adopt-existing-state with the original private settings.'
+fi
+
 env_file="$root/middleware/.env"
 compose() {
     local settings_file=$1
     shift
     docker_cli compose --project-directory "$root" -f "$root/compose.yml" \
-        --project-name godmode-middleware --env-file "$settings_file" "$@"
+        --project-name "$project" --env-file "$settings_file" "$@"
 }
 
 validate_config() {
@@ -120,12 +147,20 @@ validate_config() {
     esac
 }
 
+if [[ $operation == stop && -z $existing_dirs ]]; then
+    printf '%s\n' 'No middleware container to stop.'
+    exit 0
+fi
+
 if [[ -e $env_file || -L $env_file ]]; then
     [[ -f $env_file && ! -L $env_file && -O $env_file && -r $env_file ]] \
         || die 'Use an operator-owned regular middleware/.env file, not a symlink.'
     [[ $(stat -c '%a' -- "$env_file") == 600 ]] || die 'Set existing middleware/.env permissions with chmod 600 middleware/.env.'
     validate_config "$env_file"
 else
+    if [[ -n $existing_dirs || $operation != start ]] || has_volume "$state_volume"; then
+        die 'Restore the deployment’s private middleware/.env before using its state or services.'
+    fi
     candidate=$(mktemp "$root/middleware/.env.tmp.XXXXXXXX") || die 'Cannot create a private settings file in middleware/.'
     trap 'rm -f -- "$candidate"' EXIT
     trap 'exit 130' INT
@@ -144,6 +179,19 @@ else
     rm -f -- "$candidate"
     trap - EXIT INT TERM
     printf '%s\n' 'Created private settings in middleware/.env (mode 0600).'
+fi
+
+if [[ $operation == stop ]]; then
+    compose "$env_file" stop middleware >/dev/null 2>&1 || die 'Could not stop this checkout’s middleware service.'
+    printf '%s\n' 'Middleware stopped. State and keys were preserved.'
+    exit 0
+fi
+
+if ! has_volume "$owner_volume"; then
+    docker_cli volume create --label "io.godmode.checkout-sha=$owner_id" "$owner_volume" >/dev/null 2>&1 \
+        || die 'Cannot record middleware deployment ownership.'
+    # Creation is idempotent and can return another checkout’s marker after a race.
+    verify_owner
 fi
 
 printf '%s\n' 'Building and starting the loopback-only middleware. The first build can take a few minutes.'

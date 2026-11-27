@@ -1,21 +1,2 @@
-# Keep local configs, profiles, secrets and runtime state out of the legacy
-# combined build context. The main middleware image has its own allowlist.
+# Supported builds use middleware/ or docker/ with their own allowlists.
 **
-!docker/
-docker/**
-!docker/Dockerfile.combined
-!docker/launch.py
-!docker/supervisord.conf
-!middleware/
-middleware/**
-!middleware/requirements.txt
-!middleware/server.py
-!middleware/agents.py
-!middleware/dashboard.html
-!middleware/scaling_engine.py
-!middleware/server_integration.py
-!middleware/server_manager.py
-!middleware/rcon_client.py
-!middleware/a2s_client.py
-!middleware/auth.py
-!middleware/tactical_objectives.py

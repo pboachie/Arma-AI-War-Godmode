@@ -228,14 +228,24 @@ async def server_log_stream(request: Request):
 
 @router.get("/config")
 async def server_config():
-    """Read current server configuration JSON."""
+    """Expose selected operational settings, never the credential-bearing file."""
     _require_service(_server_manager, "server_manager")
     try:
         config = await _server_manager.get_config()
-        return config
+        if not isinstance(config, dict) or "error" in config:
+            raise ValueError("Unavailable server configuration")
+        result = {key: config[key] for key in ("bindAddress", "bindPort", "publicAddress", "publicPort")
+                  if type(config.get(key)) in (str, int)}
+        game = config.get("game")
+        if isinstance(game, dict):
+            result["game"] = {
+                key: game[key] for key in ("name", "scenarioId", "maxPlayers", "visible", "crossPlatform")
+                if type(game.get(key)) in (str, int, bool)
+            }
+        return result
     except Exception as e:
-        log.error("Failed to read server config: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        log.error("Failed to read server config (%s)", type(e).__name__)
+        raise HTTPException(status_code=500, detail="Unable to read server configuration") from None
 
 
 def _parse_docker_size(value: str) -> float | None:

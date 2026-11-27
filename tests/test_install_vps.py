@@ -1,5 +1,6 @@
 """Offline installer regression tests. Run on Linux with Python 3."""
 
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -14,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DOCKER_STUB = r'''#!/usr/bin/env bash
 set -eu
 printf '%s\n' "$*" >> docker.calls
-if [[ -v GODMODE_API_KEY || -v GODMODE_PORT || -v LLM_PROVIDER || -v COMPOSE_FILE ]]; then
+if [[ -v GODMODE_API_KEY || -v GODMODE_PORT || -v LLM_PROVIDER || -v COMPOSE_FILE || -v COMPOSE_PROJECT_NAME ]]; then
     printf '%s\n' 'ambient application or Compose setting reached Docker' >&2
     exit 1
 fi
@@ -25,6 +26,15 @@ case "$*" in
     '--context default compose version --short') echo v2.30.0; exit ;;
     '--context default compose up --help') echo 'up --wait-timeout'; exit ;;
     '--context default ps --all '*) if [[ -f docker.existing ]]; then cat docker.existing; fi; exit ;;
+    '--context default volume ls '*)
+        if [[ -f docker.state ]]; then echo godmode-middleware_middleware-state; fi
+        if [[ -f docker.owner ]]; then echo godmode-middleware-ownership; fi
+        exit ;;
+    '--context default volume inspect '*) cat docker.owner; exit ;;
+    '--context default volume create --label io.godmode.checkout-sha='*)
+        if [[ ! -f docker.owner ]]; then printf '%s\n' "${6#*=}" > docker.owner; fi
+        echo godmode-middleware-ownership
+        exit ;;
 esac
 [[ $1 == --context && $2 == default && $3 == compose ]]
 settings=''
@@ -50,6 +60,7 @@ case "$*" in
             exit 1
         fi
         ;;
+    'stop middleware') ;;
     *) exit 1 ;;
 esac
 '''
@@ -61,7 +72,7 @@ class InstallerTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory(prefix="godmode installer ")
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
-        for relative in ("compose.yml", "middleware/Dockerfile", "scripts/install-vps.sh"):
+        for relative in ("compose.yml", "middleware/Dockerfile", "scripts/install-vps.sh", "scripts/stop.sh"):
             target = self.root / relative
             target.parent.mkdir(exist_ok=True)
             shutil.copyfile(ROOT / relative, target)
@@ -76,9 +87,9 @@ class InstallerTests(unittest.TestCase):
         for name in ("DOCKER_HOST", "DOCKER_CONTEXT"):
             self.env.pop(name, None)
 
-    def run_installer(self, **environment):
+    def run_installer(self, *args, **environment):
         return subprocess.run(
-            ["bash", "-x", str(self.root / "scripts/install-vps.sh")],
+            ["bash", "-x", str(self.root / "scripts/install-vps.sh"), *args],
             cwd=self.root,
             env=self.env | environment,
             capture_output=True,
@@ -159,7 +170,44 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("another checkout", result.stderr)
         self.assertFalse(self.settings.exists())
         deployment.write_text(f"{self.root}\n")
+        self.assertIn("Restore", self.run_installer().stderr)
+        self.write_operator_settings()
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_volume_only_restart_and_stop_check_durable_owner(self):
+        (self.root / "docker.state").touch()
+        (self.root / "docker.owner").write_text("other-checkout\n")
+        for args in ((), ("--stop",), ("--adopt-existing-state",)):
+            self.assertIn("another checkout", self.run_installer(*args).stderr)
+        self.assertFalse(self.settings.exists())
+        self.assertNotIn(" stop middleware", self.calls.read_text())
+        (self.root / "docker.owner").write_text(hashlib.sha256(os.fsencode(self.root.resolve())).hexdigest() + "\n")
+        self.write_operator_settings()
         self.assertEqual(self.run_installer().returncode, 0)
+        (self.root / "docker.existing").write_text(f"{self.root}\n")
+        self.assertNotEqual(self.run_installer("--stop", DOCKER_HOST="tcp://example.test:2375").returncode, 0)
+        stop = subprocess.run(["bash", str(self.root / "scripts/stop.sh")], cwd=self.root,
+                              env=self.env | {"COMPOSE_PROJECT_NAME": "other"},
+                              capture_output=True, text=True, timeout=20)
+        self.assertEqual(stop.returncode, 0, stop.stderr)
+        self.assertIn(" stop middleware", self.calls.read_text())
+
+    def write_operator_settings(self):
+        self.settings.write_text("GODMODE_API_KEY=" + "a" * 64 + "\nGODMODE_GAME_API_KEY=" + "b" * 64 + "\n")
+        self.settings.chmod(0o600)
+
+    def test_older_volume_requires_intentional_adoption_and_settings(self):
+        (self.root / "docker.state").touch()
+        self.assertIn("--adopt-existing-state", self.run_installer().stderr)
+        self.assertIn("Restore", self.run_installer("--adopt-existing-state").stderr)
+        self.assertFalse(self.settings.exists())
+        self.write_operator_settings()
+        previous = self.settings.read_bytes()
+        adopted = self.run_installer("--adopt-existing-state")
+        self.assertEqual(adopted.returncode, 0, adopted.stderr)
+        self.assertTrue((self.root / "docker.owner").exists())
+        self.assertEqual(self.settings.read_bytes(), previous)
 
 
 if __name__ == "__main__":

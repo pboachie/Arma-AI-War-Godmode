@@ -6,19 +6,17 @@ The repository supplies Enfusion source, the FastAPI middleware and dashboard, a
 
 ## Start the middleware on a Linux VPS
 
-For a versioned download, use the Linux VPS bundle and `SHA256SUMS` from [GitHub Releases](https://github.com/pboachie/Arma-AI-War-Godmode/releases). Extract the verified bundle and run `bash scripts/install-vps.sh` from it. A separate Workbench source ZIP is available on the same release. [Release packages and verification](docs/RELEASES.md)
+You need Bash, curl, and a local [Docker Engine](https://docs.docker.com/engine/install/) (28 or newer for loopback publishing) with a [Compose v2 plugin](https://docs.docker.com/compose/install/linux/) that supports `up --wait-timeout`. Connect to Docker over a local Unix socket with an account already authorized to use it. Docker daemon access is privileged.
 
-For the clone-and-install option below, you also need Git and curl.
-
-Both options need Bash and a local [Docker Engine](https://docs.docker.com/engine/install/) (28 or newer for loopback publishing) with a [Compose v2 plugin](https://docs.docker.com/compose/install/linux/) that supports `up --wait-timeout`. Connect to Docker over a local Unix socket with an account already authorized to use it. Docker daemon access is privileged.
-
-Run the command below from a directory you control on the VPS. It downloads the bootstrap, clones `main` into `./Arma-AI-War-Godmode`, and starts the middleware without replacing an existing checkout.
+Run this from a directory you control. The bootstrap comes from the latest published GitHub Release and verifies that release's exact VPS bundle before starting the middleware. It leaves any existing `./Arma-AI-War-Godmode` directory untouched.
 
 ```bash
-( installer=$(mktemp) && trap 'rm -f -- "$installer"' EXIT && curl -q --proto '=https' --proto-redir '=https' -fsSL -o "$installer" https://raw.githubusercontent.com/pboachie/Arma-AI-War-Godmode/main/scripts/bootstrap-vps.sh && bash "$installer" )
+( installer=$(mktemp) && trap 'rm -f -- "$installer"' EXIT && curl -q --proto '=https' --proto-redir '=https' -fsSL -o "$installer" https://github.com/pboachie/Arma-AI-War-Godmode/releases/latest/download/install-linux-vps.sh && bash "$installer" )
 ```
 
-The one-liner follows the moving `main` branch. To pin both steps, set `reviewed_commit` to the full SHA of a commit you trust, then run:
+You can also download a specific release bootstrap instead of using `latest`. For older releases without a bootstrap, including v3.0.1, verify and extract the VPS archive directly. [Release packages and verification](docs/RELEASES.md)
+
+For a pinned **source** install, use Git and set `reviewed_commit` to the full SHA of a commit you trust. This path does not use the tested release bundle.
 
 ```bash
 ( installer=$(mktemp) && trap 'rm -f -- "$installer"' EXIT && curl -q --proto '=https' --proto-redir '=https' -fsSL -o "$installer" "https://raw.githubusercontent.com/pboachie/Arma-AI-War-Godmode/$reviewed_commit/scripts/bootstrap-vps.sh" && bash "$installer" --ref "$reviewed_commit" )

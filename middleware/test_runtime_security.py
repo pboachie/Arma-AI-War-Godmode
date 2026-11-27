@@ -3,17 +3,23 @@
 import asyncio
 import gzip
 import importlib.util
+import json
 import os
 import re
 import stat
 import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
+import auth
+import server_integration
 import server_manager
 
 
@@ -243,6 +249,357 @@ def test_session_history_is_bounded_with_default_provider_disabled(runtime, monk
             assert client.get(f"/api/battle-summary/{session}", headers=ADMIN_HEADER).status_code == 200
         assert set(module._session_stats) == set(module._battle_plans) == set(module._generated_summaries) == {"second", "third"}
         assert client.get("/api/battle-summary/first", headers=ADMIN_HEADER).status_code == 200
+
+
+@pytest.mark.parametrize("serializer", ["conflict-hook", "explicit-component"])
+def test_tracked_sitrep_serializers_preserve_consumed_fields(runtime, serializer):
+    module = runtime()
+    player = {"position": [110, 12, 130], "velocity": [1, 0, 2],
+              "position_trail": [[108, 12, 128]], "heading": 45}
+    if serializer == "conflict-hook":
+        report = {
+            "players": [{**player, "id": 7, "name": "Fixture"}], "player_count": 1,
+            "mission_time_seconds": 30, "time_of_day": 13.5, "weather": "overcast",
+            "events": ["player_connected:7"], "squads_active": 2, "vehicles_active": 1,
+            "commands_executed": 4,
+        }
+    else:
+        report = {
+            "players": [{**player, "player_id": 7, "health_pct": 0.6, "is_in_vehicle": False}],
+            "player_count": 1, "current_weather": "Overcast", "mission_time_seconds": 30,
+            "recent_events": ["player_connected:7"], "current_objective": "Fixture objective",
+            "total_spawned_groups": 2, "total_spawned_vehicles": 1,
+            "enemy_units": [{"unit_id": "fixture-unit", "position": [150, 2, 180], "morale": "steady",
+                             "health_pct": 0.7, "formation": "line", "casualties": 1}],
+            "contacts": [{"contact_id": "fixture-contact", "last_known_position": [130, 5, 170]}],
+            "terrain_samples": [{"position": [110, 12, 130], "terrain_type": "open", "cover_density": 0.25}],
+            "spawn_anchors": [{"anchor_id": "fixture-anchor", "position": [190, 1, 210], "priority": 0.6}],
+            "weather_tactical_context": {"visibility_range_meters": 250},
+        }
+    with TestClient(module.app) as client:
+        response = client.post("/api/game-master", headers=GAME_HEADER, json=report)
+        assert response.status_code == 200 and response.json() == EMPTY_BATCH
+        state = client.get("/api/game-state", headers=ADMIN_HEADER).json()["state"]
+
+    assert state["players"][0]["player_id"] == 7
+    for key, value in player.items():
+        assert state["players"][0][key] == value
+    assert state["recent_events"] == ["player_connected:7"]
+    assert state["total_spawned_groups"] == 2 and state["total_spawned_vehicles"] == 1
+    assert state["current_weather"] == "Overcast"
+    if serializer == "conflict-hook":
+        assert state["players"][0]["name"] == "Fixture" and state["commands_executed"] == 4
+    else:
+        assert state["objective"] == "Fixture objective"
+        assert state["enemy_units"][0]["morale"] == "steady"
+        assert state["enemy_units"][0]["casualties"] == 1
+        assert state["contacts"][0]["last_known_position"] == [130, 5, 170]
+        assert state["terrain_samples"][0]["cover_density"] == 0.25
+        assert state["spawn_anchors"][0]["priority"] == 0.6
+        assert "hp:0.6" in module._build_compact_sitrep(state)
+        assert "weather_tactical_context" not in state
+
+
+def test_sitrep_collections_and_player_trails_are_bounded(runtime):
+    module = runtime()
+    caps = {
+        "enemy_units": 200, "friendly_units": 200, "ai_groups": 200, "players": 200,
+        "contacts": 500, "spawn_anchors": 256, "terrain_samples": 256, "vehicle_states": 200,
+    }
+    data = {field: [{} for _ in range(limit + 1)] for field, limit in caps.items()}
+    data["players"][0] = {"position_trail": [[110, 12, 130]] * 9}
+    data["recent_events"] = ["old event"] + ["fixture event"] * 100
+    state = module.GameSitrep.model_validate(data).model_dump()
+    assert {field: len(state[field]) for field in caps} == caps
+    assert len(state["players"][0]["position_trail"]) == 8
+    assert state["recent_events"] == ["fixture event"] * 100
+    with pytest.raises(module.ValidationError):
+        module.GameSitrep.model_validate({"recent_events": ["s" * 513]})
+    with pytest.raises(module.ValidationError):
+        module.GameSitrep.model_validate({"terrain_samples": [{"cover_density": "unknown"}]})
+
+
+def test_player_profiles_follow_roster_session_and_inactivity(runtime, monkeypatch):
+    module = runtime()
+    clock = Mock(return_value=10.0)
+    monkeypatch.setattr(module, "time", Mock(wraps=time, monotonic=clock))
+    monkeypatch.setattr(module, "_MAX_SITREP_PLAYERS", 2)
+    analyzer, pacing = module._tactical_analyzer, module._adaptive_pacing
+    maps = (
+        analyzer.player_positions, analyzer.player_engagements, analyzer.player_style_history,
+        analyzer.player_vehicle_status, analyzer.player_terrain, analyzer.player_elevation,
+        pacing._player_speeds, pacing._player_headings, pacing._player_idle_since,
+    )
+
+    def observe(session, ids):
+        state = {
+            "mission_id": session, "players": [{"player_id": i, "position": [110, 12, 130]} for i in ids],
+            "terrain_samples": [{"position": [115, 12, 130], "terrain_type": "open"}],
+            "recent_events": ["shots_fired:player_4"],
+        }
+        analyzer._update_player_tracking(state)
+        analyzer._classify_players()
+        pacing.update(state)
+
+    for _ in range(3):
+        observe("first", [1, 2, 4])
+    assert set(analyzer.player_positions) == {1, 2}
+    assert set(analyzer.player_style_history) == {1, 2}
+    assert not analyzer.player_engagements
+    observe("first", [2, 3])
+    assert all(set(history) <= {2, 3} for history in maps)
+    assert len(analyzer.player_positions[2]) == 4
+    observe("second", [2])
+    assert all(set(history) <= {2} for history in maps)
+    assert len(analyzer.player_positions[2]) == 1
+    observe("second", [2])
+    clock.return_value += module._ROSTER_IDLE_SECONDS + 1
+    observe("second", [2])
+    assert len(analyzer.player_positions[2]) == len(pacing._player_speeds[2]) == 1
+    observe("second", [])
+    assert not any(maps)
+
+
+def test_game_result_validation_only_records_known_outcomes(runtime):
+    module = runtime()
+    valid = {"command_id": "fixture-result", "unit_id": "fixture-unit",
+             "command_type": "set_time", "status": "succeeded"}
+    samples = [
+        valid, {**valid, "command_type": "unknown_fixture_type"},
+        {**valid, "status": "unknown"}, {**valid, "unit_id": "not an id"},
+        {**valid, "detail": "s" * 513},
+    ]
+    with TestClient(module.app) as client:
+        response = client.post("/api/game-master", headers=GAME_HEADER, json={
+            "mission_id": "fixture", "command_results": samples,
+        })
+        assert response.status_code == 200 and response.json() == EMPTY_BATCH
+    assert module._battle_plans["fixture"].tactic_outcomes == {
+        "set_time": {"issued": 0, "successful": 1, "failed": 0},
+    }
+    assert len(module.SitrepCommandResults(command_results=[valid] * 101).command_results) == 100
+
+
+def test_authenticated_game_rate_buckets_do_not_interfere(runtime, monkeypatch):
+    module = runtime()
+    clock = Mock(return_value=100.0)
+    monkeypatch.setattr(auth, "time", SimpleNamespace(monotonic=clock))
+    with TestClient(module.app) as client:
+        for _ in range(5):
+            assert client.post("/api/game-master", headers=ADMIN_HEADER, json={}).status_code == 401
+        for _ in range(4):
+            assert client.post("/api/game-master", headers=GAME_HEADER, json={}).status_code == 200
+        limited = client.post("/api/game-master", headers=GAME_HEADER, json={})
+        assert limited.status_code == 429 and limited.headers["retry-after"] == "10"
+        for _ in range(10):
+            assert client.get("/api/pending-commands", headers=GAME_HEADER).json() == EMPTY_BATCH
+        assert client.get("/api/pending-commands", headers=GAME_HEADER).status_code == 429
+        assert client.get("/api/health", headers=ADMIN_HEADER).status_code == 200
+        clock.return_value += 10
+        assert client.post("/api/game-master", headers=GAME_HEADER, json={}).status_code == 200
+        assert client.get("/api/pending-commands", headers=GAME_HEADER).status_code == 200
+
+
+def test_lifecycle_config_returns_only_operational_fields(runtime, monkeypatch, caplog):
+    module = runtime()
+    fixture_secret = "SYNTHETIC_PRIVATE_GAME_PASSWORD"
+    config = {"bindPort": 2001, "game": {"name": "Fixture", "maxPlayers": 8, "password": fixture_secret,
+                                        "passwordAdmin": fixture_secret, "other": {"value": fixture_secret}},
+              "rcon": {"password": fixture_secret}}
+    manager = Mock(get_config=AsyncMock(return_value=config))
+    monkeypatch.setattr(server_integration, "_server_manager", manager)
+    client = TestClient(module.app)
+    assert client.get("/api/server/config", headers=GAME_HEADER).status_code == 401
+    response = client.get("/api/server/config", headers=ADMIN_HEADER)
+    assert response.status_code == 200
+    assert response.json() == {"bindPort": 2001, "game": {"name": "Fixture", "maxPlayers": 8}}
+    manager.get_config.side_effect = ValueError(fixture_secret)
+    response = client.get("/api/server/config", headers=ADMIN_HEADER)
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Unable to read server configuration"}
+    assert fixture_secret not in caplog.text
+
+
+def test_provider_parser_budgets_preserve_known_command_fields(runtime):
+    module = runtime()
+    expected = {"command_type": "set_time", "parameters": "12", "reasoning": "fixture: // noon",
+                "sync_group": "fixture", "unit_id": "", "target_position": "0,0,0", "narrative": ""}
+    clean = {"commands": [expected, {"command_type": "unknown"}, {"command_type": "set_time", "parameters": {}}]}
+    parsed = module.parse_llm_response(json.dumps(clean))
+    assert parsed["commands"] == [expected]
+    count = module._MAX_COMMANDS_PER_BATCH
+    assert len(module._validate_command_batch({"commands": [expected] * (count + 1)})["commands"]) == count
+    assert len(module._extract_json_candidates("{} " * 12)) == module._LLM_JSON_CANDIDATE_LIMIT
+    assert module._extract_json_candidates("{" + "[" * module._LLM_JSON_DEPTH_LIMIT) == []
+    assert module.parse_llm_response(" " * module._LLM_RESPONSE_LIMIT + "{}") == module.empty_response()
+    with pytest.raises(ValueError, match="endpoints must be HTTPS"):
+        module._https_provider_url("http://provider.example.test/v1")
+    assert module._https_provider_url("https://provider.example.test/v1").startswith("https://")
+
+
+def test_single_provider_slot_and_compaction_share_admission(runtime, monkeypatch):
+    module = runtime()
+    monkeypatch.setattr(module, "_llm_enabled", lambda: True)
+    monkeypatch.setattr(module, "_LLM_MAX_CONCURRENT", 1)
+    monkeypatch.setattr(module, "_LLM_ADMISSION_TIMEOUT", 0.03)
+    monkeypatch.setattr(module, "LLM_MAX_RETRIES", 1)
+    monkeypatch.setattr(module, "COMPACTION_THRESHOLD", 7)
+    limiter = Mock(acquire=AsyncMock())
+    monkeypatch.setattr(module, "_llm_rate_limiter", limiter)
+    response = SimpleNamespace(content='{"commands":[{"command_type":"set_time","parameters":"12"}]}')
+    summary = SimpleNamespace(content="Fixture summary", usage_metadata={"input_tokens": 4, "output_tokens": 2})
+    provider = Mock(ainvoke=AsyncMock(side_effect=[response, summary]))
+    monkeypatch.setattr(module, "_get_llm", lambda: provider)
+
+    async def exercise():
+        async with asyncio.timeout(5):
+            batch = await module.call_llm("Fixture report", session_id="fixture")
+            assert batch["commands"][0]["parameters"] == "12"
+            history = module.get_session_history("fixture")
+            for _ in range(6):
+                history.add_message(module.HumanMessage(content="Fixture report"))
+            # A held slot must prevent compaction from entering the provider.
+            async with module._get_llm_semaphore():
+                await module._maybe_compact_memory("fixture")
+                assert provider.ainvoke.await_count == 1
+                assert "fixture" not in module._compacted_summaries
+            # Refill after the failed compaction trimmed the history.
+            for _ in range(7):
+                history.add_message(module.HumanMessage(content="Fixture report"))
+            await module._maybe_compact_memory("fixture")
+            assert module._compacted_summaries["fixture"] == "Fixture summary"
+            assert len(history.messages) == 6
+            assert module.stats["compaction_runs"] == 1
+            assert limiter.acquire.await_count == provider.ainvoke.await_count == 2
+            assert not module._get_llm_semaphore().locked()
+
+    asyncio.run(exercise())
+
+
+def test_provider_deadline_releases_the_slot(runtime, monkeypatch):
+    module = runtime()
+    monkeypatch.setattr(module, "_LLM_MAX_CONCURRENT", 1)
+    monkeypatch.setattr(module, "LLM_CALL_TIMEOUT", 0.03)
+    monkeypatch.setattr(module, "LLM_MAX_RETRIES", 1)
+
+    async def wait_for_briefing(_messages):
+        await asyncio.Event().wait()
+
+    async def exercise():
+        async with asyncio.timeout(5):
+            provider = Mock(ainvoke=AsyncMock(side_effect=wait_for_briefing))
+            with pytest.raises(TimeoutError):
+                await module._invoke_llm_with_retry(provider, [])
+            assert not module._get_llm_semaphore().locked()
+            provider.ainvoke.side_effect = None
+            provider.ainvoke.return_value = "Fresh fixture summary"
+            assert await module._invoke_llm_with_retry(provider, []) == "Fresh fixture summary"
+
+    asyncio.run(exercise())
+
+
+def test_provider_rate_waiters_each_consume_a_refilled_token(runtime, monkeypatch):
+    module = runtime()
+    clock = Mock(return_value=0.0)
+    monkeypatch.setattr(module, "time", Mock(wraps=time, monotonic=clock))
+
+    async def exercise():
+        sleeping = asyncio.Queue()
+
+        async def wait_for_tick(delay):
+            wake = asyncio.Event()
+            sleeping.put_nowait((delay, wake))
+            await wake.wait()
+
+        monkeypatch.setattr(module, "asyncio", SimpleNamespace(Lock=asyncio.Lock, sleep=wait_for_tick))
+        limiter = module._LLMRateLimiter(60)
+        for _ in range(10):
+            await limiter.acquire()
+        async with asyncio.timeout(5):
+            tasks = [asyncio.create_task(limiter.acquire()) for _ in range(2)]
+            first, second = await sleeping.get(), await sleeping.get()
+            assert first[0] == second[0] == 1.0
+            clock.return_value = 1.0
+            first[1].set()
+            second[1].set()
+            third = await sleeping.get()
+            assert third[0] == 1.0 and sum(task.done() for task in tasks) == 1
+            clock.return_value = 2.0
+            third[1].set()
+            await asyncio.gather(*tasks)
+
+    asyncio.run(exercise())
+
+
+def test_reset_awaits_old_cycle_and_summary_before_accepting_fresh_work(runtime, monkeypatch):
+    module = runtime()
+    monkeypatch.setattr(module, "_llm_enabled", lambda: True)
+    monkeypatch.setattr(module, "_LLM_MAX_CONCURRENT", 2)
+    monkeypatch.setattr(module, "_llm_rate_limiter", Mock(acquire=AsyncMock()))
+
+    async def exercise():
+        release = asyncio.Event()
+        kinds = ("cycle", "summary")
+        entered = {kind: asyncio.Event() for kind in kinds}
+        cancelled = {kind: asyncio.Event() for kind in kinds}
+        calls = dict.fromkeys(kinds, 0)
+        report = {
+            "mission_id": "fixture", "player_count": 1,
+            "players": [{"player_id": 1, "position": [125, 4, 148]}],
+        }
+
+        async def provider_response(messages):
+            kind = "summary" if "after-action reports" in messages[0].content else "cycle"
+            calls[kind] += 1
+            old = calls[kind] == 1
+            if old:
+                entered[kind].set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    # Simulate provider cleanup that returns a late response.
+                    cancelled[kind].set()
+                    await release.wait()
+            value = "old" if old else "fresh"
+            content = value if kind == "summary" else json.dumps({
+                "commands": [{"command_type": "set_time", "parameters": value}],
+            })
+            return SimpleNamespace(content=content)
+
+        provider = Mock(ainvoke=AsyncMock(side_effect=provider_response))
+        monkeypatch.setattr(module, "_get_llm", lambda: provider)
+        async with asyncio.timeout(7), AsyncClient(transport=ASGITransport(app=module.app),
+                                                    base_url="http://fixture.test") as client:
+            assert (await client.post("/api/game-master", headers=GAME_HEADER, json=report)).status_code == 200
+            await entered["cycle"].wait()
+            summary_path = "/api/battle-summary/fixture"
+            old_summary = asyncio.create_task(client.get(summary_path, headers=ADMIN_HEADER))
+            await entered["summary"].wait()
+            reset = asyncio.create_task(client.post("/api/reset", headers=ADMIN_HEADER))
+            try:
+                await asyncio.gather(*(event.wait() for event in cancelled.values()))
+                assert not reset.done()
+                assert (await client.post("/api/game-master", headers=GAME_HEADER, json=report)).json() == EMPTY_BATCH
+            finally:
+                release.set()
+            assert (await reset).json() == {"status": "reset"}
+            assert (await old_summary).status_code == 409
+            assert module._background_llm_task is None
+            assert not module._last_good_responses and not module._inflight_calls
+            assert not module.command_log and not module._generated_summaries
+            assert not list(module._BATTLE_SUMMARIES_DIR.glob("*.json"))
+
+            assert (await client.post("/api/game-master", headers=GAME_HEADER, json=report)).status_code == 200
+            await module._background_llm_task
+            assert len(module.command_log) == 1
+            batch = module._last_good_responses["fixture"]
+            assert any(cmd["parameters"] == "fresh" for cmd in batch["commands"])
+            assert not any(cmd["parameters"] == "old" for cmd in batch["commands"])
+            fresh = await client.get(summary_path, headers=ADMIN_HEADER)
+            assert fresh.json()["report"] == "fresh"
+            assert len(list(module._BATTLE_SUMMARIES_DIR.glob("fixture_*.json"))) == 1
+
+    asyncio.run(exercise())
 
 
 def test_provider_diagnostics_omit_response_and_exception_bodies(runtime, caplog):

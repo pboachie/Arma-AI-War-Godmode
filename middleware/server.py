@@ -35,7 +35,7 @@ import uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from urllib.parse import urlsplit
 from tactical_objectives import generate_tactical_objectives as _tac_obj_impl
 from tactical_objectives import inject_tactical_intel as _tac_intel_impl
@@ -60,13 +60,12 @@ from agents import AgentOrchestrator, create_orchestrator
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from auth import APIKeyMiddleware, RateLimitMiddleware, SecurityHeadersMiddleware
 
 # ─── LangChain imports ───
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.chat_history import InMemoryChatMessageHistory
 
 # ─── Logging ───
@@ -385,30 +384,25 @@ class _LLMRateLimiter:
     """Async token-bucket rate limiter for outbound LLM API calls."""
 
     def __init__(self, rpm: int):
-        self._rate = rpm / 60.0          # tokens per second
+        self._rate = max(1, rpm) / 60.0  # tokens per second
         self._max_tokens = max(rpm / 6, 3)  # burst capacity (10s worth, min 3)
         self._tokens = self._max_tokens
         self._last_refill = time.monotonic()
         self._lock = asyncio.Lock()
 
     async def acquire(self):
-        async with self._lock:
-            now = time.monotonic()
-            elapsed = now - self._last_refill
-            self._tokens = min(self._max_tokens,
-                               self._tokens + elapsed * self._rate)
-            self._last_refill = now
-
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-                return
-
-            # Must wait for a token
-            wait = (1.0 - self._tokens) / self._rate
-            self._tokens = 0.0
-
-        log.debug("LLM rate limiter: waiting %.2fs before next request", wait)
-        await asyncio.sleep(wait)
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                self._tokens = min(self._max_tokens,
+                                   self._tokens + (now - self._last_refill) * self._rate)
+                self._last_refill = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                wait = (1.0 - self._tokens) / self._rate
+            # A different waiter can claim the refilled token first.
+            await asyncio.sleep(wait)
 
         async with self._lock:
             now = time.monotonic()
@@ -434,19 +428,51 @@ def _extract_retry_after(err_str: str) -> Optional[float]:
 
 
 LLM_CALL_TIMEOUT = int(os.getenv("LLM_CALL_TIMEOUT", "60"))
+_LLM_ADMISSION_TIMEOUT = 10.0
+_LLM_RESPONSE_LIMIT = 64 * 1024
+_LLM_JSON_DEPTH_LIMIT = 32
+_LLM_JSON_CANDIDATE_LIMIT = 8
+_MAX_COMMANDS_PER_BATCH = 100
+
+
+def _provider_response_text(response) -> str:
+    """Use only bounded text, including provider-specific text blocks."""
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content if len(content) <= _LLM_RESPONSE_LIMIT else ""
+    if isinstance(content, list) and len(content) <= 64:
+        pieces = []
+        budget = _LLM_RESPONSE_LIMIT
+        for block in content:
+            text = block if isinstance(block, str) else (
+                block.get("text") if isinstance(block, dict) and block.get("type") == "text" else None
+            )
+            if isinstance(text, str):
+                budget -= len(text)
+                if budget < 0:
+                    return ""
+                pieces.append(text)
+        return "".join(pieces)
+    return ""
 
 
 async def _invoke_llm_with_retry(llm, messages, *, caller_label: str = "llm"):
     """Invoke an LLM with exponential backoff retry on transient errors (429, 5xx, timeouts)."""
     last_exc = None
     for attempt in range(1, LLM_MAX_RETRIES + 1):
-        await _llm_rate_limiter.acquire()
         sem = _get_llm_semaphore()
         try:
-            async with sem:
-                response = await asyncio.wait_for(
-                    llm.ainvoke(messages), timeout=LLM_CALL_TIMEOUT
-                )
+            acquired = False
+            try:
+                async with asyncio.timeout(_LLM_ADMISSION_TIMEOUT):
+                    await sem.acquire()
+                    acquired = True
+                    await _llm_rate_limiter.acquire()
+                async with asyncio.timeout(LLM_CALL_TIMEOUT):
+                    response = await llm.ainvoke(messages)
+            finally:
+                if acquired:
+                    sem.release()
             if attempt > 1:
                 log.info("[%s] Succeeded on attempt %d/%d", caller_label, attempt, LLM_MAX_RETRIES)
             return response
@@ -509,49 +535,6 @@ def _provider_error_label(exc: Exception) -> str:
 
 
 # ═══════════════════════════════════════════════════════════
-# Pydantic Models
-# ═══════════════════════════════════════════════════════════
-
-class GameCommand(BaseModel):
-    command_type: str = Field(
-        description="move, attack, defend, patrol, set_ambush, seek_and_destroy, retreat, "
-        "suppress, overwatch, silent_move, garrison, establish_op, fighting_withdrawal, "
-        "flank_left, flank_right, breach, patrol_cloverleaf, patrol_zigzag, "
-        "bounding_overwatch, coordinated_operation, "
-        "hull_down, overwatch_position, dismount_assault, cas_run, troop_insert, convoy_form, "
-        "spawn_infantry, spawn_vehicle, spawn_reinforcements, "
-        "set_weather, set_time, set_wind, set_weather_progression, set_tactical_lighting, "
-        "environment_mood, artillery_barrage, building_fire, set_ambient_intensity, "
-        "distant_combat_ambience, thunder_near, explosion, smoke, flare, "
-        "radio_message, radio_comms, intel_feed, faction_comms, intercepted_comms, player_acknowledgment, "
-        "objective_create, objective_complete, objective_fail, pacing_directive, "
-        "cleanup_area, cleanup_dead, despawn_unit, "
-        "mortar_strike, air_support, supply_drop, establish_checkpoint, "
-        "lay_mines, set_roadblock, set_alert_level, spawn_marker"
-    )
-    unit_id: str = Field(default="new")
-    target_position: str = Field(default="0,0,0")
-    parameters: str = Field(default="")
-    narrative: str = Field(default="")
-    reasoning: str = Field(default="")
-
-    @field_validator("command_type")
-    @classmethod
-    def validate_command_type(cls, v: str) -> str:
-        if v not in VALID_COMMAND_TYPES:
-            log.warning("Unknown command_type from LLM: %s", v)
-            # Don't reject - LLM might invent types. Just warn.
-        return v
-
-
-class CommandBatch(BaseModel):
-    commands: list[GameCommand] = Field(default_factory=list)
-    narrative_broadcast: str = Field(default="")
-    weather_command: str = Field(default="")
-    time_override: float = Field(default=-1)
-
-
-# ═══════════════════════════════════════════════════════════
 # Command Type Whitelist
 # ═══════════════════════════════════════════════════════════
 
@@ -592,6 +575,8 @@ VALID_COMMAND_TYPES: frozenset[str] = frozenset({
 
 # Arma Reforger map bounds (Everon ~12km x 12km, generous bounds)
 _MAP_BOUND = 25000.0  # meters — generous cap for any map
+_MAX_SITREP_PLAYERS = 200
+_ROSTER_IDLE_SECONDS = 300
 
 
 def _clamp_position(pos: list) -> list:
@@ -602,17 +587,19 @@ def _clamp_position(pos: list) -> list:
     if not isinstance(pos, list):
         return pos
     clamped = []
-    for i, v in enumerate(pos):
+    for i, v in enumerate(pos[:3]):
         try:
             val = float(v)
+            if not math.isfinite(val):
+                val = 0.0
             if i == 1:  # y (vertical / altitude)
                 val = max(-500.0, min(2000.0, val))
             else:  # x, z (horizontal)
                 val = max(-_MAP_BOUND, min(_MAP_BOUND, val))
             clamped.append(val)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             clamped.append(0.0)
-    return clamped
+    return clamped + [0.0] * (3 - len(clamped))
 
 
 def _is_valid_player_position(pos) -> bool:
@@ -634,9 +621,15 @@ def _is_valid_player_position(pos) -> bool:
 _UNIT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-:.]{1,64}$")
 
 
-class SitrepUnit(BaseModel):
+class SitrepModel(BaseModel):
+    model_config = {"extra": "ignore", "str_max_length": 512, "allow_inf_nan": False}
+
+
+class SitrepUnit(SitrepModel):
     """Validates an enemy unit entry in the SITREP."""
     unit_id: str = ""
+    unit_type: str = ""
+    faction: str = ""
     position: list = Field(default_factory=lambda: [0, 0, 0])
     health_pct: float = Field(default=1.0, ge=0.0, le=1.0)
     strength: int = Field(default=0, ge=0, le=200)
@@ -647,12 +640,20 @@ class SitrepUnit(BaseModel):
     health: float = Field(default=1.0)
     distance_to_objective: float = Field(default=999.0, ge=0.0)
     is_engaging: bool = False
+    casualties: int = Field(default=0, ge=0, le=200)
+    formation: str = ""
+    combat_mode: str = ""
+    morale: str | float | None = None
+    ammo_status: str = ""
+    is_suppressed: bool = False
+    time_in_current_order: float = Field(default=0.0, ge=0.0)
+    time_since_order: float = Field(default=0.0, ge=0.0)
 
     @field_validator("unit_id")
     @classmethod
     def validate_unit_id(cls, v: str) -> str:
-        if v and not _UNIT_ID_PATTERN.match(v):
-            raise ValueError(f"Invalid unit_id format: {v!r}")
+        if v and not _UNIT_ID_PATTERN.fullmatch(v):
+            raise ValueError("Invalid unit_id format")
         return v
 
     @field_validator("position")
@@ -661,19 +662,19 @@ class SitrepUnit(BaseModel):
         return _clamp_position(v)
 
 
-class SitrepPlayer(BaseModel):
+class SitrepPlayer(SitrepModel):
     """Validates a player entry in the SITREP."""
-    player_id: int = Field(default=0, alias="id")
+    player_id: int = Field(default=0, alias="id", ge=0, le=2_147_483_647)
     name: str = ""
     position: list = Field(default_factory=lambda: [0, 0, 0])
-    health: float = Field(default=1.0)
-    health_pct: float = Field(default=1.0, ge=0.0, le=1.0)
+    health: float | None = None
+    health_pct: float | None = Field(default=None, ge=0.0, le=1.0)
     is_in_vehicle: bool = False
-    vehicle_type: str = ""
+    vehicle_type: str | None = None
     weapon: str = ""
     vehicle: str = ""
     velocity: list = Field(default_factory=lambda: [0, 0, 0])
-    heading: float = Field(default=0.0)
+    heading: float = Field(default=0.0, ge=-360.0, le=360.0)
     position_trail: list[list] = Field(default_factory=list)
 
     model_config = {"populate_by_name": True}
@@ -683,7 +684,7 @@ class SitrepPlayer(BaseModel):
     def normalize_position_key(cls, data: dict) -> dict:
         """Accept both 'pos' (legacy game format) and 'position' keys."""
         if isinstance(data, dict) and "pos" in data and "position" not in data:
-            data["position"] = data.pop("pos")
+            return {**data, "position": data["pos"]}
         return data
 
     @field_validator("position")
@@ -696,15 +697,15 @@ class SitrepPlayer(BaseModel):
     def validate_velocity(cls, v: list) -> list:
         return _clamp_position(v)
 
-    @field_validator("position_trail")
+    @field_validator("position_trail", mode="before")
     @classmethod
-    def validate_position_trail(cls, v: list) -> list:
+    def validate_position_trail(cls, v) -> list:
         if not isinstance(v, list):
             return []
         return [_clamp_position(pos) for pos in v[:8]]
 
 
-class SitrepContact(BaseModel):
+class SitrepContact(SitrepModel):
     """Validates a contact entry in the SITREP."""
     contact_id: str = ""
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -718,7 +719,7 @@ class SitrepContact(BaseModel):
         return _clamp_position(v)
 
 
-class SitrepAIGroup(BaseModel):
+class SitrepAIGroup(SitrepModel):
     """Validates an AI group entry."""
     group_id: str = Field(default="", alias="id")
     position: list = Field(default_factory=lambda: [0, 0, 0])
@@ -732,7 +733,7 @@ class SitrepAIGroup(BaseModel):
         return _clamp_position(v)
 
 
-class SitrepSpawnAnchor(BaseModel):
+class SitrepSpawnAnchor(SitrepModel):
     """Validates curated spawn / control anchors supplied by the game."""
     anchor_id: str = ""
     name: str = ""
@@ -749,81 +750,155 @@ class SitrepSpawnAnchor(BaseModel):
         return _clamp_position(v)
 
 
-class GameSitrep(BaseModel):
+class SitrepTerrainSample(SitrepModel):
+    position: list = Field(default_factory=lambda: [0, 0, 0])
+    elevation: float = 0.0
+    terrain_type: str = "unknown"
+    cover_density: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    @field_validator("position")
+    @classmethod
+    def validate_position(cls, v: list) -> list:
+        return _clamp_position(v)
+
+
+class SitrepVehicle(SitrepModel):
+    vehicle_id: str = ""
+    unit_id: str = ""
+    id: str = ""
+    vehicle_type: str = ""
+    faction: str = ""
+    health_pct: float = Field(default=1.0, ge=0.0, le=1.0)
+    position: list = Field(default_factory=lambda: [0, 0, 0])
+
+    @field_validator("position")
+    @classmethod
+    def validate_position(cls, v: list) -> list:
+        return _clamp_position(v)
+
+
+class SitrepEvent(SitrepModel):
+    type: str | None = None
+    location: str | None = None
+    name: str | None = None
+    faction: str | None = None
+    captured_by: str | None = None
+    outcome: str | None = None
+    event: str | None = None
+    description: str | None = None
+
+
+class GameSitrep(SitrepModel):
     """Validates the full SITREP payload from the game."""
     mission_id: str = ""
-    mission_time_seconds: float = Field(default=0.0, ge=0.0)
-    player_count: int = Field(default=0, ge=0, le=200)
+    mission_time_seconds: float = Field(default=0.0, ge=0.0, le=315360000.0)
+    player_count: int = Field(default=0, ge=0, le=_MAX_SITREP_PLAYERS)
     mission_name: str = ""
     objective: str = ""
     current_weather: str = Field(default="Clear")
     weather_controls_available: bool = True
     time_of_day: float = Field(default=12.0, ge=0.0, le=24.0)
     wind_speed: float = Field(default=0.0, ge=0.0, le=100.0)
+    wind_direction: float = 0.0
+    total_spawned_groups: int = Field(default=0, ge=0, le=10000)
+    total_spawned_vehicles: int = Field(default=0, ge=0, le=10000)
+    commands_executed: int = Field(default=0, ge=0)
+    max_squads: int = Field(default=30, ge=0, le=10000)
+    squads_at_limit: bool = False
+    server_fps: float = Field(default=30, ge=0.0, le=1000.0)
 
     enemy_units: list[SitrepUnit] = Field(default_factory=list)
+    friendly_units: list[SitrepUnit] = Field(default_factory=list)
     ai_groups: list[SitrepAIGroup] = Field(default_factory=list)
     players: list[SitrepPlayer] = Field(default_factory=list)
     contacts: list[SitrepContact] = Field(default_factory=list)
     spawn_anchors: list[SitrepSpawnAnchor] = Field(default_factory=list)
-    recent_events: list[str | dict] = Field(default_factory=list)
+    terrain_samples: list[SitrepTerrainSample] = Field(default_factory=list)
+    vehicle_states: list[SitrepVehicle] = Field(default_factory=list)
+    recent_events: list[str | SitrepEvent] = Field(default_factory=list)
 
-    model_config = {"extra": "allow"}  # Allow unknown fields for forward compat
+    @model_validator(mode="before")
+    @classmethod
+    def cap_collections(cls, values):
+        if not isinstance(values, dict):
+            return values
+        data = dict(values)
+        for field, limit in (
+            ("enemy_units", 200), ("friendly_units", 200), ("ai_groups", 200), ("players", _MAX_SITREP_PLAYERS),
+            ("contacts", 500), ("spawn_anchors", 256), ("terrain_samples", 256), ("vehicle_states", 200),
+        ):
+            if isinstance(data.get(field), list):
+                data[field] = data[field][:limit]
+        if isinstance(data.get("recent_events"), list):
+            data["recent_events"] = data["recent_events"][-100:]
+        return data
 
     @field_validator("current_weather")
     @classmethod
     def validate_weather(cls, v: str) -> str:
         valid = {"Clear", "Cloudy", "Overcast", "Rainy", "Storm", "Foggy"}
-        if v and v not in valid:
+        v = v.strip().capitalize()
+        if v not in valid:
             log.warning("Unknown weather value, defaulting to Clear")
             return "Clear"
         return v
 
-    @field_validator("enemy_units")
-    @classmethod
-    def cap_enemy_units(cls, v: list) -> list:
-        if len(v) > 200:
-            log.warning("SITREP has %d enemy_units, capping at 200", len(v))
-            return v[:200]
-        return v
-
-    @field_validator("players")
-    @classmethod
-    def cap_players(cls, v: list) -> list:
-        if len(v) > 200:
-            log.warning("SITREP has %d players, capping at 200", len(v))
-            return v[:200]
-        return v
-
-    @field_validator("contacts")
-    @classmethod
-    def cap_contacts(cls, v: list) -> list:
-        if len(v) > 500:
-            log.warning("SITREP has %d contacts, capping at 500", len(v))
-            return v[:500]
-        return v
-
-    @field_validator("recent_events")
-    @classmethod
-    def cap_events(cls, v: list) -> list:
-        if len(v) > 100:
-            return v[-100:]  # Keep most recent
-        return v
-
-
-class CommandResult(BaseModel):
+class CommandResult(SitrepModel):
     """Result reported by the game for a previously issued command."""
     command_id: str = Field(description="ID matching the original command (unit_id + command_type)")
-    unit_id: str = Field(description="Unit that executed the command")
+    unit_id: str = Field(pattern=_UNIT_ID_PATTERN, description="Unit that executed the command")
     command_type: str = Field(description="The command that was executed")
-    status: str = Field(description="succeeded, failed, partial, timeout, cancelled")
+    status: Literal["succeeded", "failed", "partial", "timeout", "cancelled"]
     detail: str = Field(default="", description="Optional detail about what happened")
     position: str = Field(default="", description="Unit position when result was reported")
     timestamp: float = Field(default=0.0, description="Game time when result occurred")
 
+    @field_validator("command_type")
+    @classmethod
+    def known_command_type(cls, value: str) -> str:
+        if value not in VALID_COMMAND_TYPES:
+            raise ValueError("Unknown command result type")
+        return value
+
 
 class SitrepCommandResults(BaseModel):
     command_results: list[CommandResult] = Field(default_factory=list)
+
+    @field_validator("command_results", mode="before")
+    @classmethod
+    def bounded_valid_results(cls, value) -> list[CommandResult]:
+        results = []
+        if isinstance(value, list):
+            for entry in value[-100:]:
+                try:
+                    results.append(CommandResult.model_validate(entry))
+                except ValidationError:
+                    continue
+        return results
+
+
+class _PlayerRoster:
+    """Keep profile maps confined to the current bounded roster and session."""
+
+    def __init__(self):
+        self._session: str | None = None
+        self._last_observation: float | None = None
+
+    def synchronize(self, state: dict, *maps: dict) -> tuple[list[dict], set[int]]:
+        players = state.get("players", [])[:_MAX_SITREP_PLAYERS]
+        ids = {player.get("player_id", player.get("id", 0)) for player in players}
+        session = state.get("mission_id", "")
+        now = time.monotonic()
+        new_session = self._session != session
+        expired = self._last_observation is not None and now - self._last_observation > _ROSTER_IDLE_SECONDS
+        for history in maps:
+            if new_session or expired:
+                history.clear()
+            else:
+                for pid in history.keys() - ids:
+                    del history[pid]
+        self._session, self._last_observation = session, now
+        return players, ids
 
 
 # ═══════════════════════════════════════════════════════════
@@ -855,6 +930,7 @@ class TacticalAnalyzer:
         self.player_vehicle_status: dict[int, bool] = {}
         self.player_terrain: dict[int, str] = {}
         self.player_elevation: dict[int, float] = {}
+        self._roster = _PlayerRoster()
 
     def _difficulty_assessment(self) -> str:
         """Backward-compatible difficulty label helper used by tests and debug tooling."""
@@ -1061,8 +1137,12 @@ class TacticalAnalyzer:
         return analysis
 
     def _update_player_tracking(self, game_state: dict):
-        for player in game_state.get("players", []):
-            pid = player.get("player_id", 0)
+        players, active_ids = self._roster.synchronize(
+            game_state, self.player_positions, self.player_engagements, self.player_style_history,
+            self.player_vehicle_status, self.player_terrain, self.player_elevation,
+        )
+        for player in players:
+            pid = player.get("player_id", player.get("id", 0))
             pos = player.get("position", [0, 0, 0])
 
             # Skip players with invalid/zero positions (entity not spawned yet)
@@ -1081,8 +1161,8 @@ class TacticalAnalyzer:
         # Extract per-player terrain from terrain_samples if available
         terrain_samples = game_state.get("terrain_samples", [])
         if terrain_samples:
-            for player in game_state.get("players", []):
-                pid = player.get("player_id", 0)
+            for player in players:
+                pid = player.get("player_id", player.get("id", 0))
                 pos = player.get("position", [0, 0, 0])
                 closest_terrain = "unknown"
                 closest_dist = float("inf")
@@ -1103,6 +1183,8 @@ class TacticalAnalyzer:
                     if part.startswith("player_"):
                         try:
                             pid = int(part.split("_")[1])
+                            if pid not in active_ids:
+                                continue
                             self.player_engagements[pid].append(event)
                             if len(self.player_engagements[pid]) > 30:
                                 self.player_engagements[pid].pop(0)
@@ -1653,6 +1735,7 @@ class AdaptivePacingManager:
         self._player_speeds: dict[int, list[float]] = defaultdict(list)
         self._player_headings: dict[int, list[float]] = defaultdict(list)
         self._player_idle_since: dict[int, float] = {}
+        self._roster = _PlayerRoster()
         self._last_combat_event_time: float = 0.0
         self._combat_start_time: float = 0.0
         self._in_combat: bool = False
@@ -1667,7 +1750,9 @@ class AdaptivePacingManager:
         self._state_history: list[dict] = []
     def update(self, game_state: dict) -> None:
         now = time.time()
-        players = game_state.get("players", [])
+        players, _ = self._roster.synchronize(
+            game_state, self._player_speeds, self._player_headings, self._player_idle_since,
+        )
         enemy_units = game_state.get("enemy_units", [])
         contacts = game_state.get("contacts", [])
         events = game_state.get("recent_events", [])
@@ -2969,7 +3054,8 @@ _compacted_summaries: dict[str, str] = {}
 async def _maybe_compact_memory(session_id: str):
     """If history exceeds threshold, use LLM to compress old messages
     into a strategic briefing and replace them."""
-    if not _llm_enabled():
+    epoch = _session_epoch
+    if not _llm_enabled() or _resetting:
         return
     history = get_session_history(session_id)
     msg_count = len(history.messages)
@@ -3011,11 +3097,14 @@ async def _maybe_compact_memory(session_id: str):
 
     try:
         llm = _get_llm()
-        response = await llm.ainvoke([
+        response = await _invoke_llm_with_retry(llm, [
             SystemMessage(content="You are a military intel analyst. Write concise factual briefings."),
             HumanMessage(content=compaction_prompt),
-        ])
-        summary = response.content if hasattr(response, "content") else str(response)
+        ], caller_label="memory_compaction")
+        _assert_session_current(epoch)
+        summary = _provider_response_text(response)
+        if not summary:
+            return
         _compacted_summaries[session_id] = summary
 
         history.clear()
@@ -3027,6 +3116,7 @@ async def _maybe_compact_memory(session_id: str):
 
         if hasattr(response, "usage_metadata") and response.usage_metadata:
             async with _state_lock:
+                _assert_session_current(epoch)
                 stats["total_input_tokens"] += response.usage_metadata.get("input_tokens", 0)
                 stats["total_output_tokens"] += response.usage_metadata.get("output_tokens", 0)
                 stats["compaction_runs"] = stats.get("compaction_runs", 0) + 1
@@ -3270,6 +3360,20 @@ def _collect_battle_data(session_id: str) -> dict:
 
 async def generate_battle_summary(session_id: str) -> dict:
     """Generate a dramatic military after-action report for a session."""
+    if _resetting:
+        raise HTTPException(status_code=409, detail="Session reset in progress")
+    epoch = _session_epoch
+    job = _track_summary(asyncio.create_task(_generate_battle_summary(session_id, epoch)))
+    try:
+        return await job
+    except asyncio.CancelledError:
+        if epoch != _session_epoch and not asyncio.current_task().cancelling():
+            raise HTTPException(status_code=409, detail="Session was reset") from None
+        raise
+
+
+async def _generate_battle_summary(session_id: str, epoch: int) -> dict:
+    _assert_session_current(epoch)
     if session_id in _generated_summaries:
         log.info("Returning cached battle summary for session %s", session_id)
         return _generated_summaries[session_id]
@@ -3360,7 +3464,10 @@ async def generate_battle_summary(session_id: str) -> dict:
             HumanMessage(content=aar_prompt),
         ]
         response = await _invoke_llm_with_retry(llm, messages, caller_label="battle_summary")
-        report_text = response.content if hasattr(response, "content") else str(response)
+        _assert_session_current(epoch)
+        report_text = _provider_response_text(response)
+        if not report_text:
+            raise ValueError("Empty or oversized provider response")
     except Exception as e:
         log.error("LLM call failed for battle summary: %s", _provider_error_label(e))
         report_text = (
@@ -3379,6 +3486,7 @@ async def generate_battle_summary(session_id: str) -> dict:
             f"TOTAL COMMANDS: {battle_data['commands_issued']}\n"
             f"[LLM summary generation failed -- basic statistics above]")
 
+    _assert_session_current(epoch)
     result = {
         "session_id": session_id,
         "generated_at": time.time(),
@@ -3551,6 +3659,18 @@ _SYSTEM_PROMPT_RAW = SYSTEM_PROMPT.replace("{{{{", "{").replace("}}}}", "}")
 # LangChain LLM Setup
 # ═══════════════════════════════════════════════════════════
 
+def _https_provider_url(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+        if (parsed.scheme == "https" and parsed.hostname and parsed.username is None
+                and parsed.password is None and not parsed.query and not parsed.fragment):
+            _ = parsed.port
+            return value
+    except ValueError:
+        pass
+    raise ValueError("Credential-bearing provider endpoints must be HTTPS without URL credentials or parameters")
+
+
 def _build_chat_model(provider: str, model_name: str, max_tokens: int):
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
@@ -3564,7 +3684,7 @@ def _build_chat_model(provider: str, model_name: str, max_tokens: int):
         if not GLM_API_KEY:
             raise ValueError("GLM_API_KEY required. Get one at https://open.z.ai/")
         return ChatOpenAI(model=model_name, max_tokens=max_tokens,
-                          openai_api_key=GLM_API_KEY, openai_api_base=GLM_BASE_URL,
+                          openai_api_key=GLM_API_KEY, openai_api_base=_https_provider_url(GLM_BASE_URL),
                           temperature=float(os.getenv("GLM_TEMPERATURE", "0.8")),
                           timeout=LLM_CALL_TIMEOUT)
     elif provider == "openrouter":
@@ -3575,7 +3695,7 @@ def _build_chat_model(provider: str, model_name: str, max_tokens: int):
             model=model_name,
             max_tokens=max_tokens,
             openai_api_key=OPENROUTER_API_KEY,
-            openai_api_base=OPENROUTER_BASE_URL,
+            openai_api_base=_https_provider_url(OPENROUTER_BASE_URL),
             default_headers={
                 "HTTP-Referer": "https://github.com/arma-godmode-ai",
                 "X-Title": "Arma Reforger God Mode AI",
@@ -3724,6 +3844,30 @@ _manual_cmd_rate = 2.0     # refill per second
 _manual_cmd_last = time.time()
 
 _state_lock = asyncio.Lock()
+_reset_lock = asyncio.Lock()
+_session_epoch = 0
+_resetting = False
+_summary_jobs: set[asyncio.Task] = set()
+
+
+def _assert_session_current(epoch: int) -> None:
+    if _resetting or epoch != _session_epoch:
+        raise asyncio.CancelledError("Session was reset")
+
+
+def _track_summary(job: asyncio.Task) -> asyncio.Task:
+    _summary_jobs.add(job)
+    job.add_done_callback(_summary_jobs.discard)
+    return job
+
+
+async def _cancel_session_work() -> None:
+    pending = {*_inflight_calls.values(), *_summary_jobs, _background_llm_task}
+    tasks = [task for task in pending if task is not None and not task.done() and task is not asyncio.current_task()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 # ─── LLM concurrency gate & request deduplication ───
 # Limits concurrent LLM calls to avoid flooding the provider with 429s.
@@ -3813,7 +3957,7 @@ async def call_llm(
     game_state: Optional[dict] = None,
 ) -> dict:
     global _consecutive_failures, _circuit_open_until
-    if not _llm_enabled():
+    if not _llm_enabled() or _resetting:
         return empty_response("llm_disabled")
 
     # ── Circuit breaker: skip LLM entirely if too many recent failures ──
@@ -3852,7 +3996,8 @@ async def call_llm(
     try:
         return await inner_task
     finally:
-        _inflight_calls.pop(session_id, None)
+        if _inflight_calls.get(session_id) is inner_task:
+            del _inflight_calls[session_id]
 
 
 async def _call_llm_inner(
@@ -3863,6 +4008,8 @@ async def _call_llm_inner(
 ) -> dict:
     """Inner LLM call with concurrency limiting and proper fallback chain."""
     global _consecutive_failures, _circuit_open_until
+    epoch = _session_epoch
+    _assert_session_current(epoch)
 
     history = get_session_history(session_id)
     battle_plan = _get_battle_plan(session_id)
@@ -3897,21 +4044,7 @@ async def _call_llm_inner(
 
     full_msg = "\n\n".join(ctx_parts) + "\n\n" + user_message if ctx_parts else user_message
 
-    # ── Acquire concurrency semaphore to limit parallel LLM calls ──
-    sem = _get_llm_semaphore()
-    acquired = False
     try:
-        try:
-            await asyncio.wait_for(sem.acquire(), timeout=10.0)
-            acquired = True
-        except asyncio.TimeoutError:
-            log.warning("LLM semaphore timeout (all %d slots busy). "
-                         "Returning cached/emergency fallback.", _LLM_MAX_CONCURRENT)
-            cached = _last_good_responses.get(session_id)
-            if cached:
-                return cached
-            return _emergency_fallback_response(game_state)
-
         llm = _get_llm()
         prompt = ChatPromptTemplate.from_messages([
             ("system", SYSTEM_PROMPT),
@@ -3924,30 +4057,20 @@ async def _call_llm_inner(
         })
         response = await _invoke_llm_with_retry(llm, formatted.to_messages(),
                                                        caller_label="call_llm")
+        _assert_session_current(epoch)
 
         if hasattr(response, "usage_metadata") and response.usage_metadata:
             async with _state_lock:
+                _assert_session_current(epoch)
                 stats["total_input_tokens"] += response.usage_metadata.get("input_tokens", 0)
                 stats["total_output_tokens"] += response.usage_metadata.get("output_tokens", 0)
 
-        # Try structured parser first, then fall back to manual extraction
-        text = response.content if hasattr(response, "content") else str(response)
-        result = None
-
-        try:
-            parser = JsonOutputParser(pydantic_object=CommandBatch)
-            result = await parser.ainvoke(response)
-        except Exception as parse_err:
-            log.warning("JsonOutputParser failed, attempting manual extraction: %s", type(parse_err).__name__)
-            result = parse_llm_response(text)
-
-        if not result or not result.get("commands"):
-            log.info("Parser produced no commands, trying deeper extraction from %d chars", len(text))
-            result = parse_llm_response(text)
+        text = _provider_response_text(response)
+        result = parse_llm_response(text) if text else empty_response()
 
         # Minimum-response guarantee: if all parsing still yields 0 commands,
         # generate defensive hold commands so units are never left idle
-        if not result or not result.get("commands"):
+        if not result.get("commands"):
             stats["empty_llm_responses"] = stats.get("empty_llm_responses", 0) + 1
             log.warning("LLM returned 0 commands after all parse attempts — "
                         "generating emergency defensive hold")
@@ -3963,6 +4086,7 @@ async def _call_llm_inner(
             battle_plan.update_from_commands(validated, game_state)
 
         await _maybe_compact_memory(session_id)
+        _assert_session_current(epoch)
 
         # Success: reset circuit breaker, cache good response
         _consecutive_failures = 0
@@ -3971,8 +4095,10 @@ async def _call_llm_inner(
         return validated
 
     except Exception as e:
+        _assert_session_current(epoch)
         log.warning("Chain failed, trying fallback: %s", _provider_error_label(e))
         fallback_result = await _fallback_call(full_msg, history, game_state=game_state)
+        _assert_session_current(epoch)
 
         if fallback_result.get("commands"):
             # Fallback succeeded — reset circuit breaker
@@ -3992,9 +4118,6 @@ async def _call_llm_inner(
                             "Cooling off for %ds.", _consecutive_failures, backoff)
 
         return fallback_result
-    finally:
-        if acquired:
-            sem.release()
 
 
 def _format_tactical_intel(intel: dict) -> str:
@@ -4143,6 +4266,8 @@ async def _fallback_call(user_message: str, history: InMemoryChatMessageHistory,
                          game_state: Optional[dict] = None) -> dict:
     if not _llm_enabled():
         return empty_response("llm_disabled")
+    epoch = _session_epoch
+    _assert_session_current(epoch)
     try:
         llm = _get_llm()
         messages = [SystemMessage(content=_SYSTEM_PROMPT_RAW)]
@@ -4151,10 +4276,12 @@ async def _fallback_call(user_message: str, history: InMemoryChatMessageHistory,
 
         response = await _invoke_llm_with_retry(llm, messages,
                                                        caller_label="fallback_call")
-        text = response.content if hasattr(response, "content") else str(response)
+        _assert_session_current(epoch)
+        text = _provider_response_text(response)
 
         if hasattr(response, "usage_metadata") and response.usage_metadata:
             async with _state_lock:
+                _assert_session_current(epoch)
                 stats["total_input_tokens"] += response.usage_metadata.get("input_tokens", 0)
                 stats["total_output_tokens"] += response.usage_metadata.get("output_tokens", 0)
 
@@ -4179,29 +4306,36 @@ async def _fallback_call(user_message: str, history: InMemoryChatMessageHistory,
 def _validate_command_batch(data: dict) -> dict:
     if not isinstance(data, dict):
         return empty_response()
-    data.setdefault("commands", [])
-    data.setdefault("narrative_broadcast", "")
-    data.setdefault("weather_command", "")
-    data.setdefault("time_override", -1)
+    raw_commands = data.get("commands")
+    if not isinstance(raw_commands, list):
+        raw_commands = []
+    response = empty_response()
+    for field, length in (("narrative_broadcast", 1024), ("weather_command", 64)):
+        value = data.get(field)
+        if isinstance(value, str):
+            response[field] = value[:length]
+    override = data.get("time_override")
+    if type(override) in (int, float) and -1 <= override <= 24:
+        response["time_override"] = override
+    fields = {
+        "unit_id": ("", 64), "target_position": ("0,0,0", 96), "parameters": ("", 2048),
+        "narrative": ("", 1024), "reasoning": ("", 1024), "formation": ("", 64),
+        "combat_mode": ("", 64), "speed_mode": ("", 64), "stance": ("", 64), "sync_group": ("", 64),
+    }
     valid = []
     dropped = 0
-    for cmd in data["commands"]:
-        if not isinstance(cmd, dict):
-            log.warning("Dropped non-dict command: %s", type(cmd).__name__)
+    for raw in raw_commands[:_MAX_COMMANDS_PER_BATCH]:
+        ct = raw.get("command_type") if isinstance(raw, dict) else None
+        if not isinstance(ct, str) or ct not in VALID_COMMAND_TYPES or any(
+            not isinstance(raw.get(key, default), str) or len(raw.get(key, default)) > limit
+            for key, (default, limit) in fields.items()
+        ):
             dropped += 1
             continue
-        if "command_type" not in cmd:
-            log.warning("Dropped command missing command_type: %s",
-                        json.dumps(cmd, default=str)[:200])
-            dropped += 1
-            continue
-        cmd.setdefault("unit_id", "")
-        cmd.setdefault("target_position", "0,0,0")
-        cmd.setdefault("parameters", "")
-        cmd.setdefault("narrative", "")
-        cmd.setdefault("reasoning", "")
+        cmd = {"command_type": ct, **{key: raw.get(key, default) for key, (default, _) in fields.items()
+                                      if key in raw or key in ("unit_id", "target_position", "parameters",
+                                                              "narrative", "reasoning")}}
         # Ensure spawn commands have a non-empty parameters field (vehicle/unit type)
-        ct = cmd["command_type"]
         if ct == "spawn_vehicle" and not cmd["parameters"].strip():
             log.warning("spawn_vehicle command has empty parameters, defaulting to 'uaz469'")
             cmd["parameters"] = "uaz469"
@@ -4212,21 +4346,21 @@ def _validate_command_batch(data: dict) -> dict:
         if ct == "spawn_vehicle":
             cmd["parameters"] = _normalize_spawn_parameter(cmd["parameters"])
             if cmd["parameters"] not in SUPPORTED_VEHICLE_TYPES:
-                log.warning("Dropped unsupported spawn_vehicle type: %s", cmd["parameters"])
+                log.warning("Dropped unsupported vehicle type")
                 dropped += 1
                 continue
         elif ct in ("spawn_infantry", "spawn_reinforcements"):
             cmd["parameters"] = _normalize_spawn_parameter(cmd["parameters"])
             if cmd["parameters"] not in SUPPORTED_INFANTRY_TYPES:
-                log.warning("Dropped unsupported %s type: %s", ct, cmd["parameters"])
+                log.warning("Dropped unsupported infantry type")
                 dropped += 1
                 continue
         valid.append(cmd)
     if dropped:
         log.warning("Dropped %d/%d malformed commands from batch",
                     dropped, dropped + len(valid))
-    data["commands"] = valid
-    return data
+    response["commands"] = valid
+    return response
 
 
 def _normalize_spawn_parameter(value: str) -> str:
@@ -6781,7 +6915,7 @@ def _repair_truncated_json(text: str) -> str | None:
     try:
         json.loads(text)
         return None  # not truncated
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         pass
 
     # Trim back to last complete key-value boundary
@@ -6809,10 +6943,12 @@ def _repair_truncated_json(text: str) -> str | None:
         if in_str:
             continue
         if ch in "{[":
+            if len(opens) >= _LLM_JSON_DEPTH_LIMIT:
+                return None
             opens.append("}" if ch == "{" else "]")
         elif ch in "}]":
-            if opens:
-                opens.pop()
+            if not opens or opens.pop() != ch:
+                return None
 
     # If we're inside an unclosed string, close it first
     if in_str:
@@ -6827,53 +6963,42 @@ def _repair_truncated_json(text: str) -> str | None:
     try:
         json.loads(trimmed)
         return trimmed
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         return None
 
 
 def _extract_json_candidates(text: str) -> list:
-    """Extract all possible JSON object substrings from text, longest first."""
+    """Scan once for up to eight balanced objects, without rescanning malformed text."""
     candidates = []
-    i = 0
-    while i < len(text):
-        if text[i] == "{":
-            depth = 0
-            in_string = False
-            escape_next = False
-            start = i
-            closed = False
-            for j in range(i, len(text)):
-                ch = text[j]
-                if escape_next:
-                    escape_next = False
-                    continue
-                if ch == "\\":
-                    escape_next = True
-                    continue
-                if ch == '"' and not escape_next:
-                    in_string = not in_string
-                    continue
-                if in_string:
-                    continue
-                if ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        candidates.append(text[start:j + 1])
-                        i = j
-                        closed = True
-                        break
-            if not closed:
-                fragment = text[start:]
-                open_b = fragment.count("[") - fragment.count("]")
-                open_c = fragment.count("{") - fragment.count("}")
-                if open_b > 0:
-                    fragment += "]" * open_b
-                if open_c > 0:
-                    fragment += "}" * open_c
-                candidates.append(fragment)
-        i += 1
+    stack: list[str] = []
+    start = 0
+    in_string = escaped = False
+    for index, char in enumerate(text[:_LLM_RESPONSE_LIMIT]):
+        if not stack:
+            if char == "{":
+                start, in_string, escaped = index, False, False
+                stack.append("}")
+            continue
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "{[":
+            if len(stack) >= _LLM_JSON_DEPTH_LIMIT:
+                break
+            stack.append("}" if char == "{" else "]")
+        elif char in "}]":
+            if stack.pop() != char:
+                stack.clear()
+            elif not stack:
+                candidates.append(text[start:index + 1])
+                if len(candidates) >= _LLM_JSON_CANDIDATE_LIMIT:
+                    break
     candidates.sort(key=len, reverse=True)
     return candidates
 
@@ -6882,38 +7007,25 @@ def _extract_commands_from_text(text: str) -> dict:
     """Last-resort: regex-extract individual command objects from free text."""
     result = empty_response()
     commands = []
-    command_types = [
-        "move", "attack", "defend", "patrol", "retreat", "flank",
-        "spawn_group", "heal_unit", "resupply", "set_stance",
-        "set_formation", "set_behavior", "garrison", "ambush",
-        "suppress", "overwatch", "reinforce", "hold_fire",
-        "cleanup_dead", "despawn_unit", "radio_message",
-        "objective_create", "objective_complete",
-    ]
-    for ct in command_types:
-        pattern = rf'["\']?command_type["\']?\s*[:=]\s*["\']({ct})["\']'
-        for match in re.finditer(pattern, text, re.IGNORECASE):
-            pos = match.start()
-            brace_start = text.rfind("{", max(0, pos - 200), pos)
-            if brace_start == -1:
-                continue
-            depth = 0
-            end = brace_start
-            for k in range(brace_start, min(len(text), brace_start + 1000)):
-                if text[k] == "{":
-                    depth += 1
-                elif text[k] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        end = k + 1
-                        break
-            snippet = _fix_common_json_issues(text[brace_start:end])
+    pattern = r'["\']?command_type["\']?\s*[:=]\s*["\']([a-z0-9_]{1,64})["\']'
+    for index, match in enumerate(re.finditer(pattern, text)):
+        if index >= _MAX_COMMANDS_PER_BATCH:
+            break
+        command_type = match.group(1)
+        if command_type not in VALID_COMMAND_TYPES:
+            continue
+        pos = match.start()
+        brace_start = text.rfind("{", max(0, pos - 200), pos)
+        if brace_start == -1:
+            continue
+        for candidate in _extract_json_candidates(text[brace_start:brace_start + 1000]):
             try:
-                cmd = json.loads(snippet)
-                if isinstance(cmd, dict) and "command_type" in cmd:
+                cmd = json.loads(_fix_common_json_issues(candidate))
+                if isinstance(cmd, dict) and cmd.get("command_type") == command_type:
                     commands.append(cmd)
-            except json.JSONDecodeError:
-                pass
+                    break
+            except (ValueError, RecursionError):
+                continue
 
     if commands:
         log.info("Text extraction recovered %d commands from non-JSON response", len(commands))
@@ -6938,8 +7050,8 @@ def parse_llm_response(text: str) -> dict:
     3. Parse bare JSON arrays of commands
     4. Last resort: regex-extract individual commands from free text
     """
-    if not text or not text.strip():
-        log.warning("parse_llm_response called with empty text")
+    if not isinstance(text, str) or len(text) > _LLM_RESPONSE_LIMIT or not text.strip():
+        log.warning("Ignored empty or oversized provider response")
         return empty_response()
 
     original_text = text
@@ -6947,17 +7059,18 @@ def parse_llm_response(text: str) -> dict:
     # Strategy 1: Strip fences and try direct parse
     text = _strip_markdown_fences(text)
     text_fixed = _fix_common_json_issues(text)
-    try:
-        parsed = json.loads(text_fixed)
-        # Handle bare arrays: [{"command_type": ...}, ...]
-        if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
-            parsed = {"commands": parsed}
-        if isinstance(parsed, dict):
-            result = _validate_command_batch(parsed)
-            if result.get("commands"):
-                return result
-    except json.JSONDecodeError:
-        pass
+    for candidate in (text,) if text_fixed == text else (text, text_fixed):
+        try:
+            parsed = json.loads(candidate)
+            # Handle bare arrays: [{"command_type": ...}, ...]
+            if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                parsed = {"commands": parsed}
+            if isinstance(parsed, dict):
+                result = _validate_command_batch(parsed)
+                if result.get("commands"):
+                    return result
+        except (ValueError, RecursionError):
+            continue
 
     # Strategy 2: Extract JSON object candidates from the text
     candidates = _extract_json_candidates(text_fixed)
@@ -6971,18 +7084,18 @@ def parse_llm_response(text: str) -> dict:
                         parsed = {"commands": [parsed]}
                     log.info("Extracted valid JSON from candidate (%d chars)", len(candidate))
                     return _validate_command_batch(parsed)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             continue
 
     # Strategy 3: Maybe it is a bare JSON array of commands (no wrapper object)
-    arr_match = re.search(r"\[[\s\S]*\]", text_fixed)
-    if arr_match:
+    arr_start, arr_end = text_fixed.find("["), text_fixed.rfind("]")
+    if 0 <= arr_start < arr_end:
         try:
-            arr = json.loads(_fix_common_json_issues(arr_match.group()))
+            arr = json.loads(text_fixed[arr_start:arr_end + 1])
             if isinstance(arr, list) and arr and isinstance(arr[0], dict):
                 log.info("Parsed response as bare JSON array of %d commands", len(arr))
                 return _validate_command_batch({"commands": arr})
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             pass
 
     # Strategy 4: Repair truncated JSON (token limit hit mid-response)
@@ -6998,7 +7111,7 @@ def parse_llm_response(text: str) -> dict:
                     log.info("Recovered %d commands from truncated JSON response",
                              len(result["commands"]))
                     return result
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             pass
 
     # Strategy 5: Last resort -- regex extraction of individual commands
@@ -7024,7 +7137,9 @@ async def _agent_llm_caller(system_prompt: str, user_message: str) -> dict:
     messages = [_SysMsg(content=system_prompt), _HumMsg(content=user_message)]
     try:
         response = await _invoke_llm_with_retry(llm, messages, caller_label="agent_llm")
-        text = response.content if hasattr(response, "content") else str(response)
+        text = _provider_response_text(response)
+        if not text:
+            return empty_response()
 
         # Try generic JSON first (avoids noisy warnings from parse_llm_response
         # for non-command agents like strategic_commander)
@@ -7128,10 +7243,10 @@ async def lifespan(app: FastAPI):
             _rcon_client = None
             log.info("RCON: disconnected")
         _agent_orchestrator = None
-        for task in (_background_llm_task, _campaign_autosave_task):
-            if task is not None and not task.done():
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+        await _cancel_session_work()
+        if _campaign_autosave_task is not None and not _campaign_autosave_task.done():
+            _campaign_autosave_task.cancel()
+            await asyncio.gather(_campaign_autosave_task, return_exceptions=True)
         # Save battle summaries on shutdown for cross-session learning.
         for sid, bp in _battle_plans.items():
             if bp.turn_count > 0:
@@ -7204,7 +7319,9 @@ def _process_command_results(results: list[dict], battle_plan, session_id: str):
             status = result.get("status", "")
             detail = result.get("detail", "")
 
-            if not unit_id or not cmd_type or not status:
+            if (not isinstance(unit_id, str) or not _UNIT_ID_PATTERN.fullmatch(unit_id)
+                    or not isinstance(cmd_type, str) or cmd_type not in VALID_COMMAND_TYPES
+                    or status not in ("succeeded", "partial", "failed", "timeout", "cancelled")):
                 continue
 
             # Initialize tactic tracking if needed
@@ -7476,6 +7593,8 @@ async def _process_sitrep_background(
     """Heavy LLM processing in background. Caches results for next SITREP."""
     if not _llm_enabled():
         return
+    epoch = _session_epoch
+    _assert_session_current(epoch)
     try:
         # ── Skip LLM when no players (save tokens) ──
         if player_count == 0:
@@ -7515,6 +7634,7 @@ async def _process_sitrep_background(
                 difficulty_params=diff_params,
                 session_id=session_id,
             )
+            _assert_session_current(epoch)
 
             history = get_session_history(session_id)
             history.add_message(HumanMessage(content=user_message))
@@ -7536,6 +7656,7 @@ async def _process_sitrep_background(
         _llm_response_time_ms = round((time.time() - _llm_call_start) * 1000)
 
         async with _state_lock:
+            _assert_session_current(epoch)
             if pending_manual_commands:
                 while pending_manual_commands:
                     m = pending_manual_commands.pop(0)
@@ -7729,6 +7850,7 @@ async def _process_sitrep_background(
         bp = _get_battle_plan(session_id)
 
         async with _state_lock:
+            _assert_session_current(epoch)
             stats["total_commands_issued"] += cmd_count
             command_log.append({
                 "timestamp": time.time(),
@@ -7763,6 +7885,7 @@ async def _process_sitrep_background(
 
     except Exception as e:
         async with _state_lock:
+            _assert_session_current(epoch)
             stats["total_errors"] += 1
         log.error("Background SITREP error: %s", _provider_error_label(e))
 
@@ -7770,21 +7893,32 @@ async def _process_sitrep_background(
 @app.post("/api/game-master")
 async def game_master(request: Request):
     global _background_llm_task
+    epoch = _session_epoch
+    if _resetting:
+        return _game_command_batch(empty_response())
 
     async with _state_lock:
         stats["total_requests"] += 1
 
     raw_body = bytearray()
-    async for chunk in request.stream():
-        if len(raw_body) + len(chunk) > 1024 * 1024:
-            raise HTTPException(status_code=413, detail="SITREP exceeds 1 MiB")
-        raw_body.extend(chunk)
+    try:
+        async with asyncio.timeout(10.0):
+            async for chunk in request.stream():
+                if len(raw_body) + len(chunk) > 1024 * 1024:
+                    raise HTTPException(status_code=413, detail="SITREP exceeds 1 MiB")
+                raw_body.extend(chunk)
+    except TimeoutError:
+        raise HTTPException(status_code=408, detail="SITREP upload timed out") from None
     try:
         game_state = _parse_game_master_body(raw_body)
+        raw_results = game_state.pop("command_results", [])
         aliases = {
             "mission_time": "mission_time_seconds",
             "weather": "current_weather",
             "events": "recent_events",
+            "current_objective": "objective",
+            "squads_active": "total_spawned_groups",
+            "vehicles_active": "total_spawned_vehicles",
         }
         for old_key, new_key in aliases.items():
             if old_key in game_state and new_key not in game_state:
@@ -7794,8 +7928,9 @@ async def game_master(request: Request):
         session_id = validated.mission_id or _active_session
         if not _valid_session_id(session_id):
             raise ValueError("Invalid session identifier")
+        game_state["mission_id"] = session_id
         command_results = SitrepCommandResults(
-            command_results=game_state.pop("command_results", []),
+            command_results=raw_results,
         ).model_dump()["command_results"]
     except (ValueError, TypeError, RecursionError):
         log.warning("Discarded an invalid game-master SITREP")
@@ -7820,6 +7955,8 @@ async def game_master(request: Request):
             )
 
     async with _state_lock:
+        if _resetting or epoch != _session_epoch:
+            return _game_command_batch(empty_response())
         game_history.append({"timestamp": time.time(), "state": game_state})
 
     player_count = game_state.get("player_count", 0)
@@ -7843,7 +7980,7 @@ async def game_master(request: Request):
     if _last_known_player_count > 0 and player_count == 0:
         bp_check = _battle_plans.get(session_id)
         if bp_check and bp_check.turn_count >= 2:
-            asyncio.create_task(_auto_generate_summary_on_disconnect(session_id))
+            _track_summary(asyncio.create_task(_auto_generate_summary_on_disconnect(session_id)))
     _last_known_player_count = player_count
 
     battle_plan = _get_battle_plan(session_id)
@@ -7861,7 +7998,7 @@ async def game_master(request: Request):
         _campaign_state.update_from_sitrep(game_state)
         # The bundled game client receives operator commands in its SITREP
         # reply. Other game clients can use the dedicated polling endpoint.
-        return _game_command_batch(await _take_pending_commands())
+        return _game_command_batch(await _take_pending_commands(epoch))
 
     compact_sitrep = _build_compact_sitrep(game_state)
 
@@ -8052,6 +8189,19 @@ async def get_stats():
 
 @app.post("/api/reset")
 async def reset():
+    global _session_epoch, _resetting, _background_llm_task
+    async with _reset_lock:
+        _resetting = True
+        _session_epoch += 1
+        try:
+            await _cancel_session_work()
+            _background_llm_task = None
+            return await _clear_session_state()
+        finally:
+            _resetting = False
+
+
+async def _clear_session_state():
     # Save battle summaries before clearing
     for sid, bp in _battle_plans.items():
         if bp.turn_count > 0:
@@ -8079,6 +8229,7 @@ async def reset():
     _circuit_open_until = 0.0
     _last_known_player_count = 0
     _tactical_analyzer.__init__()
+    _adaptive_pacing.__init__()
     return {"status": "reset"}
 
 
@@ -8094,6 +8245,7 @@ async def get_game_state():
 
 @app.post("/api/manual-command")
 async def manual_command(request: Request):
+    epoch = _session_epoch
     global _manual_cmd_tokens, _manual_cmd_last
     # Token bucket rate limiting
     now = time.time()
@@ -8126,6 +8278,8 @@ async def manual_command(request: Request):
     commands = _validate_command_batch(body)
     cmd_count = len(commands.get("commands", []))
     async with _state_lock:
+        if _resetting or epoch != _session_epoch:
+            raise HTTPException(status_code=409, detail="Session was reset")
         if len(pending_manual_commands) >= MAX_PENDING_MANUAL:
             raise HTTPException(status_code=429, detail="Too many pending manual commands")
         pending_manual_commands.append(commands)
@@ -8154,9 +8308,9 @@ def _game_command_batch(batch: dict) -> dict:
     return {key: batch[key] for key in ("commands", "narrative_broadcast", "weather_command", "time_override")}
 
 
-async def _take_pending_commands() -> dict:
+async def _take_pending_commands(epoch: int | None = None) -> dict:
     async with _state_lock:
-        if not pending_manual_commands:
+        if _resetting or (epoch is not None and epoch != _session_epoch) or not pending_manual_commands:
             return empty_response()
         merged = empty_response()
         while pending_manual_commands:

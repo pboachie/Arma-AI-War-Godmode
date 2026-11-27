@@ -17,6 +17,7 @@ PROJECT = "Arma-AI-War-Godmode"
 UPSTREAM = f"https://github.com/pboachie/{PROJECT}"
 TAG_PATTERN = re.compile(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 GAME_SCRIPT = re.compile(r"scripts/Game/GameMode/GM_[A-Za-z0-9_]+\.c")
+INSTALLER_TEMPLATE = "scripts/bootstrap-release.sh"
 VPS_FILES = (
     "LICENSE",
     "compose.yml",
@@ -124,26 +125,35 @@ def _write_zip(path: Path, root: str, files: dict[str, bytes]) -> None:
             archive.writestr(member, data, compress_type=zipfile.ZIP_DEFLATED)
 
 
-def build_packages(repo: Path, commit: str, tag: str, output: Path) -> tuple[Path, Path, Path]:
+def _digest(path: Path) -> str:
+    with path.open("rb") as fh:
+        return hashlib.file_digest(fh, "sha256").hexdigest()
+
+
+def build_packages(repo: Path, commit: str, tag: str, output: Path) -> tuple[Path, Path, Path, Path]:
     if not TAG_PATTERN.fullmatch(tag) or len(tag) > 40:
         raise ValueError("Use a version tag of the form vMAJOR.MINOR.PATCH")
     tree = _tree(repo, commit)
     vps = _read_files(repo, tree, VPS_FILES) | _metadata(commit, tag, "linux-vps")
     scripts = [name for name in tree if GAME_SCRIPT.fullmatch(name)]
     workbench = _read_files(repo, tree, (*WORKBENCH_FILES, *scripts)) | _metadata(commit, tag, "workbench-source")
+    installer_code = _read_files(repo, tree, (INSTALLER_TEMPLATE,))[INSTALLER_TEMPLATE]
+    if any(installer_code.count(token) != 1 for token in (b"@RELEASE_TAG@", b"@VPS_SHA256@")):
+        raise ValueError("Release installer tag and digest placeholders are required exactly once")
 
     output.mkdir(parents=True, exist_ok=False)
     vps_root, workbench_root = f"{PROJECT}-{tag}-linux-vps", f"{PROJECT}-{tag}-workbench-source"
     tar_path, zip_path = output / f"{vps_root}.tar.gz", output / f"{workbench_root}.zip"
     _write_tar(tar_path, vps_root, vps)
     _write_zip(zip_path, workbench_root, workbench)
+    installer = output / "install-linux-vps.sh"
+    installer.write_bytes(installer_code.replace(b"@RELEASE_TAG@", tag.encode())
+                          .replace(b"@VPS_SHA256@", _digest(tar_path).encode()))
     checksums = output / "SHA256SUMS"
     with checksums.open("x", encoding="ascii", newline="\n") as manifest:
-        for path in (tar_path, zip_path):
-            with path.open("rb") as fh:
-                digest = hashlib.file_digest(fh, "sha256").hexdigest()
-            manifest.write(f"{digest}  {path.name}\n")
-    return tar_path, zip_path, checksums
+        for path in (tar_path, zip_path, installer):
+            manifest.write(f"{_digest(path)}  {path.name}\n")
+    return tar_path, zip_path, installer, checksums
 
 
 def main() -> None:

@@ -42,11 +42,11 @@ jobs:
           [[ $GITHUB_SHA =~ ^[0-9a-f]{40}$ && $RELEASE_TAG =~ ^v[0-9]+\.[0-9]+\.[1-9][0-9]*$ ]] \
             || fail 'Invalid release revision or tag.'
           prefix="Arma-AI-War-Godmode-$RELEASE_TAG"
-          assets=("$prefix-linux-vps.tar.gz" "$prefix-workbench-source.zip" SHA256SUMS)
+          assets=("$prefix-linux-vps.tar.gz" "$prefix-workbench-source.zip" install-linux-vps.sh SHA256SUMS)
           for asset in "${assets[@]}"; do
             [[ -s $asset && -f $asset && ! -L $asset ]] || fail "Missing release asset: $asset"
           done
-          sha256sum -- "${assets[@]:0:2}" | cmp -s - SHA256SUMS \
+          sha256sum -- "${assets[@]:0:3}" | cmp -s - SHA256SUMS \
             || fail 'The tested asset checksums did not match.'
 
           api="repos/$GH_REPO"

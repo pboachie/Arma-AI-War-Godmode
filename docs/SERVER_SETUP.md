@@ -15,6 +15,14 @@ steamcmd +force_install_dir "$arma_install" +login anonymous +app_update 1874900
 
 Check that SteamCMD finished successfully and that `ArmaReforgerServer` exists in the target directory before continuing. Use a Workbench and game client that match the server's release branch. See the Linux section of [Bohemia's Server Hosting guide](https://community.bohemia.net/wiki/Arma_Reforger:Server_Hosting).
 
+If a freshly installed SteamCMD logs in but returns `Missing configuration`, refresh the app metadata and retry with the Linux depot selected explicitly:
+
+```bash
+steamcmd +@sSteamCmdForcePlatformType linux +@ShutdownOnFailedCommand 1 \
+  +force_install_dir "$arma_install" +login anonymous +app_info_update 1 \
+  +app_info_print 1874900 +app_update 1874900 validate +quit
+```
+
 ## 2. Generate a private configuration
 
 From the repo root, as the account that will own the game config and profile (Python 3 required):
@@ -22,8 +30,8 @@ From the repo root, as the account that will own the game config and profile (Py
 ```bash
 umask 077
 arma_private="$HOME/.config/arma-ai-war"
-arma_profile="$HOME/.local/share/arma-ai-war/profile"
-install -d -m 0700 "$arma_private" "$arma_profile"
+arma_data="$HOME/.local/share/arma-ai-war/server-data"
+install -d -m 0700 "$arma_private" "$arma_data" "$arma_data/profile"
 if [ ! -e "$arma_private/arma.env" ]; then
   cp Configs/ArmaServer/arma.env.example "$arma_private/arma.env"
 fi
@@ -47,7 +55,7 @@ Using the same paths and game account:
 ```bash
 (
   cd "$arma_install" &&
-  ./ArmaReforgerServer -config "$arma_private/config.json" -profile "$arma_profile" -maxFPS 60
+  ./ArmaReforgerServer -config "$arma_private/config.json" -profile "$arma_data" -maxFPS 60
 )
 ```
 
@@ -70,6 +78,8 @@ RCON is unnecessary for either middleware or addon setup. If you deliberately ne
 ## Enable a provider
 
 Leave LLM disabled while validating the addon and network path. When you are ready to send in-game state to an external provider, edit `middleware/.env` privately and set `LLM_PROVIDER` and the matching credential. For example, select `openai` with `OPENAI_API_KEY` or `anthropic` with `ANTHROPIC_API_KEY`. See the [environment template](../middleware/.env.example) for the options. Do not set a fallback unless you intend to allow calls to it too. Never place a provider key in the game config, profile, or addon.
+
+For Z.ai, select `LLM_PROVIDER=glm` and supply `GLM_API_KEY`. The default `GLM_BASE_URL` is `https://api.z.ai/api/coding/paas/v4/` and the default model is `glm-4.7`. Use a key authorized for your endpoint and workload. Set `GLM_BASE_URL` and `LLM_MODEL` explicitly if using a different supported endpoint or model. [Z.ai key and endpoint guidance](https://docs.z.ai/devpack/notice/api-key-management)
 
 Apply the change from the repo root in a shell without conflicting exported provider settings:
 

@@ -35,7 +35,7 @@ python3 scripts/generate_config.py --env-file "$arma_private/arma.env" \
 ## 3. Install the game key on the server only
 
 1. On the VPS, open `middleware/.env` privately and retrieve `GODMODE_GAME_API_KEY`. It must be distinct from `GODMODE_API_KEY`, which is only for administration.
-2. In the directory passed to the dedicated server's `-profile` option, create `godmode_api_key.txt` as plain text with the game key on one line and no quotes or byte-order mark. For the [server setup example](SERVER_SETUP.md#3-launch-vanilla-first) this is `"$arma_profile/godmode_api_key.txt"`. Use a private editor, restrict the profile directory to the game service account, and make the file readable only by that account (mode `0600`).
+2. Under the directory passed to the dedicated server's `-profile` option, create `profile/godmode_api_key.txt` as plain text with the game key on one line and no quotes or byte-order mark. For the [server setup example](SERVER_SETUP.md#3-launch-vanilla-first) this is `"$arma_data/profile/godmode_api_key.txt"`. The inner `profile` directory is Enfusion's `$profile:` data root. Use a private editor, restrict the profile directory to the game service account, and make the file readable only by that account (mode `0600`).
 3. The game bridge reads `$profile:godmode_api_key.txt` and uses the value in the `X-API-Key` header for its middleware requests. Never put the key in a Workbench property, script, addon package, Workshop upload, client install, or URL. The game process does not need the admin or provider keys.
 
 ## 4. Verify a private match

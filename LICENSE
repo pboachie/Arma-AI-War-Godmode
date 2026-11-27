@@ -27,4 +27,5 @@ Arma Reforger, the game engine, and its assets are © Bohemia Interactive a.s.
 and are NOT covered by this license. You must own a legitimate copy of the game
 and comply with Bohemia Interactive's EULA and Server Hosting terms. The MIT
 license above applies only to the original code in this repository (the
-middleware, Enfusion scripts, configs, and tooling).
+middleware, configs, and tooling). Distribution of the separate Workshop
+addon is governed by its Workshop listing.

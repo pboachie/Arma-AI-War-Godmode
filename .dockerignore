@@ -1,2 +1,2 @@
-# Supported builds use middleware/ or docker/ with their own allowlists.
+# The supported image uses middleware/ with its own allowlist.
 **

@@ -6,10 +6,9 @@ import sys
 import tarfile
 import tempfile
 import unittest
-import zipfile
 from pathlib import Path
 
-from scripts.package_release import INSTALLER_TEMPLATE, VPS_FILES, WORKBENCH_FILES, build_packages
+from scripts.package_release import INSTALLER_TEMPLATE, VPS_FILES, build_packages
 
 
 class PackageReleaseTests(unittest.TestCase):
@@ -20,15 +19,14 @@ class PackageReleaseTests(unittest.TestCase):
         self.repo = self.root / "repo"
         self.repo.mkdir()
         self.git("init", "--quiet", "--template=")
-        self.extra_script = "scripts/Game/GameMode/GM_NewIntegration.c"
-        for name in set(VPS_FILES + WORKBENCH_FILES + (self.extra_script,)):
+        for name in VPS_FILES:
             path = self.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(f"committed fixture for {name}\n".encode())
         (self.repo / INSTALLER_TEMPLATE).write_bytes((Path(__file__).resolve().parents[1] / INSTALLER_TEMPLATE).read_bytes())
         # These inputs must never be packaged, even if accidentally tracked.
-        for name in ("middleware/.env", "scripts/Game/GameMode/godmode_api_key.txt",
-                     "scripts/Game/GameMode/not-source.ebo", "middleware/campaign_state.json"):
+        for name in ("middleware/.env", "middleware/godmode_api_key.txt",
+                     "middleware/campaign_state.json"):
             (self.repo / name).write_bytes(b"private fixture\n")
         self.git("add", "--force", "--", ".")
         self.git("commit", "--quiet", "-m", "fixture")
@@ -42,10 +40,12 @@ class PackageReleaseTests(unittest.TestCase):
 
     def test_only_allowlisted_committed_inputs_are_archived(self):
         (self.repo / "middleware/server.py").write_bytes(b"uncommitted fixture\n")
-        (self.repo / "scripts/Game/GameMode/GM_Untracked.c").write_bytes(b"untracked fixture\n")
+        local_scripts = self.repo / "scripts/Game/GameMode"
+        local_scripts.mkdir(parents=True)
+        (local_scripts / "GM_Untracked.c").write_bytes(b"untracked fixture\n")
         (self.repo / ".env").write_bytes(b"untracked credential fixture\n")
         tag = "v3.0.42"
-        vps, workbench, installer, sums = build_packages(self.repo, self.commit, tag, self.root / "out")
+        vps, installer, sums = build_packages(self.repo, self.commit, tag, self.root / "out")
         with tarfile.open(vps) as archive:
             members = archive.getmembers()
             paths = {item.name.split("/", 1)[1] for item in members}
@@ -55,14 +55,27 @@ class PackageReleaseTests(unittest.TestCase):
                              b"committed fixture for middleware/server.py\n")
             release = json.load(archive.extractfile(f"{vps.name.removesuffix('.tar.gz')}/RELEASE.json"))
         self.assertEqual(release, {"commit": self.commit, "package": "linux-vps", "tag": tag})
-        with zipfile.ZipFile(workbench) as archive:
-            paths = {name.split("/", 1)[1] for name in archive.namelist()}
-            self.assertEqual(paths, set(WORKBENCH_FILES) | {self.extra_script, "README.md", "RELEASE.json"})
-            self.assertIsNone(archive.testzip())
+        self.assertEqual(set(vps.parent.iterdir()), {vps, installer, sums})
         self.assertIn(hashlib.sha256(vps.read_bytes()).hexdigest(), installer.read_text())
         self.assertEqual(sums.read_text().splitlines(), [
-            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}" for path in (vps, workbench, installer)
+            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}" for path in (vps, installer)
         ])
+
+    def test_refuses_public_commits_with_addon_source_or_build_artifacts(self):
+        for name in ("Scripts/GAME/Other.c", "Configs/GodMode/example.json", "private/Addon.GPROJ",
+                     "archive/addon.ebo", "docker/launch.py", "middleware/docker-compose.yml"):
+            with self.subTest(name=name):
+                self.git("reset", "--hard", self.commit)
+                path = self.repo / name
+                path.parent.mkdir(exist_ok=True, parents=True)
+                path.write_bytes(b"addon fixture\n")
+                self.git("add", "--force", "--", name)
+                self.git("commit", "--quiet", "-m", "addon fixture")
+                commit = self.git("rev-parse", "HEAD").decode().strip()
+                out = self.root / "unexpected"
+                with self.assertRaisesRegex(ValueError, "Addon source or build assets in public commit"):
+                    build_packages(self.repo, commit, "v3.0.42", out)
+                self.assertFalse(out.exists())
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "release installer uses Linux utilities")
     def test_release_installer_verifies_pinned_archive_before_executing(self):
@@ -70,7 +83,7 @@ class PackageReleaseTests(unittest.TestCase):
         self.git("add", "scripts/install-vps.sh")
         self.git("commit", "--quiet", "-m", "fixture installer")
         sha = self.git("rev-parse", "HEAD").decode().strip()
-        vps, _, installer, _ = build_packages(self.repo, sha, "v3.0.42", self.root / "out")
+        vps, installer, _ = build_packages(self.repo, sha, "v3.0.42", self.root / "out")
         bin_dir, cwd = self.root / "bin", self.root / "deployment"
         bin_dir.mkdir()
         cwd.mkdir()

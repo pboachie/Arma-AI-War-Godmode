@@ -9,14 +9,15 @@ import json
 import re
 import subprocess
 import tarfile
-import zipfile
 from pathlib import Path
 
 
 PROJECT = "Arma-AI-War-Godmode"
 UPSTREAM = f"https://github.com/pboachie/{PROJECT}"
 TAG_PATTERN = re.compile(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
-GAME_SCRIPT = re.compile(r"scripts/Game/GameMode/GM_[A-Za-z0-9_]+\.c")
+ADDON_PREFIXES = ("scripts/game/", "configs/godmode/", "docker/")
+ADDON_SUFFIXES = (".gproj", ".ent", ".ent.meta", ".layer", ".ebo", ".pak", ".rdb")
+ADDON_BUILD_FILES = {"middleware/docker-compose.yml"}
 INSTALLER_TEMPLATE = "scripts/bootstrap-release.sh"
 VPS_FILES = (
     "LICENSE",
@@ -37,18 +38,6 @@ VPS_FILES = (
     "middleware/tactical_objectives.py",
     "scripts/install-vps.sh",
     "scripts/stop.sh",
-)
-WORKBENCH_FILES = (
-    "LICENSE",
-    "Configs/ArmaServer/arma.env.example",
-    "Configs/ArmaServer/config.template.json",
-    "Configs/GodMode/gm_config.json",
-    "scripts/generate_config.py",
-    "scripts/Game/GameMode/CTI_Campaign_WesternEveron_AI_War.ent",
-    "scripts/Game/GameMode/CTI_Campaign_WesternEveron_AI_War.ent.meta",
-    "scripts/Game/GameMode/CTI_Campaign_WesternEveron_AI_War_Layers/default.layer",
-    "scripts/Game/GameMode/GM_GodModeComponent.c",
-    "scripts/Game/GameMode/GM_RestClient.c",
 )
 
 
@@ -80,11 +69,10 @@ def _read_files(repo: Path, tree: dict[str, tuple[str, str]], paths) -> dict[str
     return selected
 
 
-def _metadata(commit: str, tag: str, kind: str) -> dict[str, bytes]:
+def _metadata(commit: str, tag: str) -> dict[str, bytes]:
     base = f"{UPSTREAM}/blob/{commit}"
     header = f"# {PROJECT} {tag}\n\nBuilt from commit [`{commit}`]({UPSTREAM}/tree/{commit}).\n\n"
-    if kind == "linux-vps":
-        instructions = f"""This bundle contains the middleware and its Docker Compose installer. It does not install the game.
+    instructions = f"""This bundle contains the middleware and its Docker Compose installer. It does not install the game or addon.
 
 Run the following command from the extracted directory. It needs Linux with Bash, Docker Engine 28+, and a Docker Compose plugin that supports `up --wait-timeout`.
 
@@ -94,14 +82,9 @@ bash scripts/install-vps.sh
 
 The installer builds the middleware image, creates two private keys, and publishes only to VPS loopback.
 See the [dashboard instructions]({base}/README.md#open-the-dashboard) and [operator runbook]({base}/docs/OPERATIONS.md).
+Get the addon from [Bohemia's Workshop](https://reforger.armaplatform.com/workshop/68EB7BF2F5940DD9).
 """
-    else:
-        instructions = f"""This is Workbench source and reference scenario data. It is not a compiled or verified Workshop addon.
-
-Use the [Workbench guide]({base}/docs/WORKBENCH_SETUP.md) to build and test against your exact game version.
-Install the middleware from the separate Linux VPS bundle.
-"""
-    manifest = {"commit": commit, "package": kind, "tag": tag}
+    manifest = {"commit": commit, "package": "linux-vps", "tag": tag}
     return {"README.md": (header + instructions).encode(),
             "RELEASE.json": (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode()}
 
@@ -116,44 +99,40 @@ def _write_tar(path: Path, root: str, files: dict[str, bytes]) -> None:
                 archive.addfile(member, io.BytesIO(data))
 
 
-def _write_zip(path: Path, root: str, files: dict[str, bytes]) -> None:
-    with zipfile.ZipFile(path, "x") as archive:
-        for name, data in sorted(files.items()):
-            member = zipfile.ZipInfo(f"{root}/{name}")
-            member.create_system = 3
-            member.external_attr = 0o100644 << 16
-            archive.writestr(member, data, compress_type=zipfile.ZIP_DEFLATED)
-
-
 def _digest(path: Path) -> str:
     with path.open("rb") as fh:
         return hashlib.file_digest(fh, "sha256").hexdigest()
 
 
-def build_packages(repo: Path, commit: str, tag: str, output: Path) -> tuple[Path, Path, Path, Path]:
+def build_packages(repo: Path, commit: str, tag: str, output: Path) -> tuple[Path, Path, Path]:
     if not TAG_PATTERN.fullmatch(tag) or len(tag) > 40:
         raise ValueError("Use a version tag of the form vMAJOR.MINOR.PATCH")
     tree = _tree(repo, commit)
-    vps = _read_files(repo, tree, VPS_FILES) | _metadata(commit, tag, "linux-vps")
-    scripts = [name for name in tree if GAME_SCRIPT.fullmatch(name)]
-    workbench = _read_files(repo, tree, (*WORKBENCH_FILES, *scripts)) | _metadata(commit, tag, "workbench-source")
+    addon_paths = sorted(
+        name for name in tree
+        if name.lower() in ADDON_BUILD_FILES
+        or name.lower().startswith(ADDON_PREFIXES)
+        or name.lower().endswith(ADDON_SUFFIXES)
+    )
+    if addon_paths:
+        raise ValueError("Addon source or build assets in public commit: " + ", ".join(addon_paths))
+    vps = _read_files(repo, tree, VPS_FILES) | _metadata(commit, tag)
     installer_code = _read_files(repo, tree, (INSTALLER_TEMPLATE,))[INSTALLER_TEMPLATE]
     if any(installer_code.count(token) != 1 for token in (b"@RELEASE_TAG@", b"@VPS_SHA256@")):
         raise ValueError("Release installer tag and digest placeholders are required exactly once")
 
     output.mkdir(parents=True, exist_ok=False)
-    vps_root, workbench_root = f"{PROJECT}-{tag}-linux-vps", f"{PROJECT}-{tag}-workbench-source"
-    tar_path, zip_path = output / f"{vps_root}.tar.gz", output / f"{workbench_root}.zip"
+    vps_root = f"{PROJECT}-{tag}-linux-vps"
+    tar_path = output / f"{vps_root}.tar.gz"
     _write_tar(tar_path, vps_root, vps)
-    _write_zip(zip_path, workbench_root, workbench)
     installer = output / "install-linux-vps.sh"
     installer.write_bytes(installer_code.replace(b"@RELEASE_TAG@", tag.encode())
                           .replace(b"@VPS_SHA256@", _digest(tar_path).encode()))
     checksums = output / "SHA256SUMS"
     with checksums.open("x", encoding="ascii", newline="\n") as manifest:
-        for path in (tar_path, zip_path, installer):
+        for path in (tar_path, installer):
             manifest.write(f"{_digest(path)}  {path.name}\n")
-    return tar_path, zip_path, installer, checksums
+    return tar_path, installer, checksums
 
 
 def main() -> None:

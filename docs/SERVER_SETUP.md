@@ -2,7 +2,7 @@
 
 Start with the [middleware quick start](../README.md#start-the-middleware-on-a-linux-vps). This guide adds an optional, separately installed Arma Reforger dedicated server. For the documented layout, run the game process directly on the same Linux host as the loopback-published middleware. Use a non-root game service account. A game container or a game server on another host does not share the VPS loopback interface.
 
-The repo-root `compose.yml` is the middleware deployment. The alternate Docker and launcher files are not required for this guide. Do not start a second stack to reach the dashboard.
+The repo-root `compose.yml` is the middleware deployment. Do not start a second stack to reach the dashboard.
 
 ## 1. Install the dedicated server
 
@@ -13,7 +13,7 @@ arma_install="$HOME/arma_reforger"
 steamcmd +force_install_dir "$arma_install" +login anonymous +app_update 1874900 validate +quit
 ```
 
-Check that SteamCMD finished successfully and that `ArmaReforgerServer` exists in the target directory before continuing. Use a Workbench and game client that match the server's release branch. See the Linux section of [Bohemia's Server Hosting guide](https://community.bohemia.net/wiki/Arma_Reforger:Server_Hosting).
+Check that SteamCMD finished successfully and that `ArmaReforgerServer` exists in the target directory before continuing. Use a game client that matches the server's release branch. See the Linux section of [Bohemia's Server Hosting guide](https://community.bohemia.net/wiki/Arma_Reforger:Server_Hosting).
 
 If a freshly installed SteamCMD logs in but returns `Missing configuration`, refresh the app metadata and retry with the Linux depot selected explicitly:
 
@@ -44,7 +44,7 @@ Edit `"$arma_private/arma.env"` directly in a private editor. Set `ARMA_ADMIN_PA
 python3 scripts/generate_config.py --env-file "$arma_private/arma.env" --output "$arma_private/config.json"
 ```
 
-Without the flags, the generator reads exported `ARMA_*` settings and writes `Arma Reforger Server/configs/config.json`. It does not read the middleware's credentials. If your game account cannot read the deployment checkout, use a separate reviewed source checkout to run the generator. The generator refuses to overwrite an existing output without `--force`. For updates, generate to a new private path and inspect it before replacing the live config. If using Workshop, reuse the reviewed [`--mods-file`](WORKBENCH_SETUP.md#2-load-only-a-trusted-build) when regenerating the config.
+Without the flags, the generator reads exported `ARMA_*` settings and writes `Arma Reforger Server/configs/config.json`. It does not read the middleware's credentials. If your game account cannot read the deployment checkout, use a separate reviewed source checkout to run the generator. The generator refuses to overwrite an existing output without `--force`. For updates, generate to a new private path and inspect it before replacing the live config. If using Workshop, reuse the reviewed [`--mods-file`](ADDON_SETUP.md#pin-the-workshop-build) when regenerating the config.
 
 The template starts on loopback for gameplay and A2S, with server-browser visibility off, a 24-player PC configuration, BattlEye on, no addons, and no RCON section. Its scenario is the vanilla Conflict on Everon mission (`{ECC61978EDCC2B5A}Missions/23_Campaign.conf`). This is an upstream scenario identifier, not evidence of a tested AI War scenario. For a different mission, set `ARMA_SCENARIO_ID` to the full scenario `.conf` resource ID, not the addon ID or the world `.ent` path. [Bohemia Server Config reference](https://community.bohemia.net/wiki/Arma_Reforger:Server_Config)
 
@@ -59,7 +59,7 @@ Using the same paths and game account:
 )
 ```
 
-Check the dedicated-server startup log for the loaded scenario and for config errors. The loopback-only default is for a local/private baseline. A client on another machine cannot join through the default loopback bind. Stop the game process gracefully before changing its config or profile. Next, follow the [Workbench and game bridge guide](WORKBENCH_SETUP.md) and test privately before allowing players in.
+Check the dedicated-server startup log for the loaded scenario and for config errors. The loopback-only default is for a local/private baseline. A client on another machine cannot join through the default loopback bind. Stop the game process gracefully before changing its config or profile. Next, [connect the Workshop addon](ADDON_SETUP.md) and test privately before allowing players in.
 
 ## 4. Decide what to expose
 

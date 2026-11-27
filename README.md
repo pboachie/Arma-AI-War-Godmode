@@ -2,7 +2,7 @@
 
 AI War is an experimental game-master addon for fictional matches in Arma Reforger. A server-side script sends an in-game situation report to Python middleware. If you enable an LLM provider, the middleware can turn that report into game commands for things like weather, objectives, NPC groups, and vehicles. Game scripts still handle local behavior, and server operators remain in control of deployment and configuration.
 
-The repository supplies Enfusion source, the FastAPI middleware and dashboard, and dedicated-server configuration tooling. It does not supply Arma Reforger binaries, a ready-to-load Workshop addon, or a verified playable scenario. Starting the middleware does not install or run the game.
+This repository supplies the self-hostable FastAPI middleware, dashboard, and dedicated-server configuration tooling. The game addons are distributed separately through Bohemia's Workshop. Starting the middleware does not install or run the game. [AI War – Core](https://reforger.armaplatform.com/workshop/68EB7BF2F5940DD9) · [AI War – Everon](https://reforger.armaplatform.com/workshop/B161D59D617A4AF5)
 
 ## Start the middleware on a Linux VPS
 
@@ -46,7 +46,7 @@ Open `http://127.0.0.1:18080/dashboard` on that workstation. The dashboard's pro
 ## Play a match with the addon
 
 1. Install the Arma Reforger dedicated server separately using SteamCMD. Generate a private server config and verify the vanilla server before adding the mod. [Dedicated-server setup](docs/SERVER_SETUP.md)
-2. Import the scripts into a Workbench mod project, verify resources and compile, and test a scenario with a trusted build of the addon. [Workbench and game bridge](docs/WORKBENCH_SETUP.md)
+2. Add Core 1.0.7 to stock Conflict, or use the separate Everon 1.0.0 scenario. Set the game key and optional remote middleware URL in the dedicated server profile. [Connect the addon](docs/ADDON_SETUP.md)
 3. Once you are ready for model calls, set `LLM_PROVIDER` and the matching provider credential in `middleware/.env`, then recreate the middleware container. This may send in-game state to your configured provider and incur charges. [Provider setup and verification](docs/SERVER_SETUP.md#enable-a-provider)
 
 For updates, backups, rollback, or troubleshooting, see the [operator runbook](docs/OPERATIONS.md). For credential boundaries and private vulnerability reporting, see [Security](SECURITY.md). For tests and dependency maintenance, see the [development guide](docs/DEVELOPMENT.md).

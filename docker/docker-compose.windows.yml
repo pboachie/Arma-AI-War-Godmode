@@ -1,2 +1,0 @@
-# Compatibility overlay. The base legacy file now uses a bridge on all hosts.
-services: {}

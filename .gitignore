@@ -57,6 +57,10 @@ Thumbs.db
 *.log
 *.pak
 *.rdb
+/scripts/Game/
+/Configs/GodMode/
+/docker/
+/middleware/docker-compose.yml
 # Compiled / downloaded addons (build output, third-party content)
 addons/
 **/addons/

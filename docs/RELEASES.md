@@ -5,19 +5,20 @@ On every push to upstream `main`, including a merged PR, GitHub Actions tests th
 | Download | What it contains |
 | --- | --- |
 | `Arma-AI-War-Godmode-<tag>-linux-vps.tar.gz` | Middleware, Docker Compose configuration, and the installer. It builds the middleware image on your VPS. |
-| `Arma-AI-War-Godmode-<tag>-workbench-source.zip` | Enfusion scripts, reference scenario data, and config tooling. No compiled addon, game binaries, or Workshop upload. |
 | `install-linux-vps.sh` | Release-pinned bootstrap that verifies the VPS bundle before running it. |
-| `SHA256SUMS` | SHA-256 checksums of the archives and bootstrap. Both archives also contain `RELEASE.json` with their exact source commit. |
+| `SHA256SUMS` | SHA-256 checksums of the VPS bundle and bootstrap. The bundle contains `RELEASE.json` with its exact source commit. |
 
-Download the archives you need and `SHA256SUMS` from the same release into one directory. On Linux, verify the files you downloaded before extracting them.
+Download the VPS bundle and `SHA256SUMS` from the same release. If you also download the bootstrap, save it in the same directory. On Linux, verify your downloads before extracting or running them.
 
 ```bash
 sha256sum --check --strict --ignore-missing SHA256SUMS
 ```
 
-On Windows, use `Get-FileHash -Algorithm SHA256` on the ZIP and compare the result with its entry in `SHA256SUMS`.
+On Windows, use `Get-FileHash -Algorithm SHA256` and compare the result with the file's entry in `SHA256SUMS`.
 
-For the middleware, use the published bootstrap or extract the VPS archive and run `bash scripts/install-vps.sh` from it. Use the archive directly for older releases without a bootstrap. Neither release path needs Git. The moving `main` source tree is for development, not the release-qualified install path. For the addon, follow the [Workbench guide](WORKBENCH_SETUP.md) and test against the intended game build. [VPS prerequisites](../README.md#start-the-middleware-on-a-linux-vps)
+Use the published bootstrap or extract the VPS archive and run `bash scripts/install-vps.sh` from it. Use the archive directly for older releases without a bootstrap. Neither release path needs Git. The moving `main` source tree is for development. [VPS prerequisites](../README.md#start-the-middleware-on-a-linux-vps)
+
+New releases contain no Workbench source or Workshop addon. Older release assets and Git history are unchanged. [Install the Workshop addon](ADDON_SETUP.md)
 
 ## Retry a failed release
 

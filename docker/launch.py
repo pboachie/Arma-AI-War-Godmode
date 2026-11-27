@@ -337,7 +337,7 @@ def main():
     print(f"  MAX_RESTARTS    : {MAX_RESTARTS}", flush=True)
     print(f"  FREEZE_CHECK    : {FREEZE_CHECK}", flush=True)
     print(f"  USE_EXPERIMENTAL: {USE_EXPERIMENTAL}", flush=True)
-    print(f"  STEAM_USER      : {STEAM_USER or '(anonymous)'}", flush=True)
+    print("  STEAM_USER      : (anonymous)", flush=True)
     print(f"  STARTUP_PARAMS  : {STARTUP_PARAMETERS or '(none)'}", flush=True)
     print(f"  LOCAL_ADDON_ID  : {LOCAL_ADDON_ID or '(disabled)'}", flush=True)
     print(f"  LOCAL_ADDON_NAME: {LOCAL_ADDON_NAME}", flush=True)

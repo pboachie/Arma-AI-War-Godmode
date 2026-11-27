@@ -2,6 +2,8 @@
 
 Use the repo-root `compose.yml` and `middleware/.env` on the VPS. These commands manage only the middleware. Stop or restart the separately installed Arma server using its own service manager. For public ingress limits, see [Server setup](SERVER_SETUP.md#4-decide-what-to-expose).
 
+The historical combined image is retired. Run the game separately so it never shares middleware or provider credentials. On Windows, use the guarded Linux installer from a WSL filesystem with Docker integration rather than the retired native launcher.
+
 ## Check the current deployment
 
 Run locally on the VPS from the repo root:
@@ -21,9 +23,9 @@ For an install from a release archive, read the source SHA and tag from `RELEASE
 ## Back up
 
 1. Record the running source SHA, middleware image ID or digest, configured ports, dedicated-server build, and exact trusted addon versions. Keep this inventory separate from credentials.
-2. Schedule downtime. Stop the game gracefully so it stops writing match state. From the repo root, run `docker compose --env-file middleware/.env stop` to flush and stop the middleware before taking a consistent snapshot.
+2. Schedule downtime. Stop the game gracefully so it stops writing match state. From the deployment directory, run `bash scripts/stop.sh` to flush and stop that checkout’s middleware before taking a consistent snapshot.
 3. Back up the Compose `middleware-state` volume mounted at `/var/lib/godmode`. Use your Docker volume backup tooling or your VPS storage snapshot system. Preserve file ownership and permissions. Separately back up `middleware/.env`, the private Arma config and input file, and the dedicated-server profile and saves if present. Assume backups contain credentials and private game data. Keep them encrypted and access-restricted. [Docker volume backup and restore](https://docs.docker.com/engine/storage/volumes/#back-up-restore-or-migrate-data-volumes)
-4. Start the middleware with `docker compose --env-file middleware/.env up -d`, then start the game if used. Verify liveness, dashboard authentication, and the game separately. Periodically restore into an isolated test environment where provider calls and player ingress are disabled. Do not remove the data volume as part of a restart or routine update.
+4. Start the middleware with `bash scripts/install-vps.sh`, then start the game if used. Verify liveness, dashboard authentication, and the game separately. Periodically restore into an isolated test environment where provider calls and player ingress are disabled. Do not remove the data volume as part of a restart or routine update.
 
 ## Update
 
@@ -38,6 +40,8 @@ For an install from a release archive, read the source SHA and tag from `RELEASE
 3. Verify that the port is still loopback-only, admin access still works, and the game bridge can submit an authenticated report if in use. If provider calls are enabled, verify them in a private match and check usage. Update the game installation and addons separately during a planned game maintenance window, with matching client and server versions.
 
 For an archive install, verify the new download and extract it into a separate temporary directory first. After backing up and stopping the stack, update the application files in the original deployment directory. Preserve `middleware/.env`, keep the same directory path and Compose volume, and rerun the installer there. [Release downloads and checksums](RELEASES.md)
+
+The guarded installer records checkout ownership in a Docker volume named `godmode-middleware-ownership`. It is not mounted into the middleware and survives container removal. If an older installation has only its state volume left, restore its original `middleware/.env` to the intended checkout and run `bash scripts/install-vps.sh --adopt-existing-state` once. This does not claim a deployment already owned by another checkout.
 
 ## Record a replay for troubleshooting
 

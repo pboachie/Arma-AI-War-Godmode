@@ -32,7 +32,7 @@ class GM_RestCallback : RestCallback
 
 class GM_RestClient
 {
-    protected static const string REST_CLIENT_REVISION = "GM_REST_AUTH_20261127";
+    protected static const string REST_CLIENT_REVISION = "GM_REST_RETRY_20261127";
     protected static const string GAME_MASTER_ENDPOINT = "api/game-master";
     protected static const string GAME_KEY_PATH = "$profile:godmode_api_key.txt";
     protected static const string GAME_KEY_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
@@ -46,8 +46,10 @@ class GM_RestClient
 
     // Retry state
     protected int m_iConsecutiveErrors = 0;
+    protected int m_iLastFailureTick = 0;
     protected float m_fBackoffMultiplier = 1.0;
     protected bool m_bConnected = false;
+    protected bool m_bRequestPending = false;
 
     // Constants
     protected static const int MAX_CONSECUTIVE_ERRORS = 5;
@@ -206,22 +208,18 @@ class GM_RestClient
     // Send SITREP to middleware (async, non-blocking)
     bool SendSITREP(string gameStateJSON)
     {
-        if (!Replication.IsServer() || RplSession.Mode() != RplMode.Dedicated || !m_Context || !m_bConnected)
+        if (!Replication.IsServer() || RplSession.Mode() != RplMode.Dedicated || !m_Context || !IsConnected())
         {
             Print("[GodMode:REST] Not connected, skipping SITREP", LogLevel.WARNING);
             return false;
         }
 
-        // Circuit breaker: if too many errors, back off
-        if (m_iConsecutiveErrors >= MAX_CONSECUTIVE_ERRORS)
-        {
-            Print("[GodMode:REST] Circuit breaker open (" + m_iConsecutiveErrors + " errors). Backing off.", LogLevel.WARNING);
-            return false;
-        }
-
         // Re-apply headers every request — Enfusion resets Connection to h2c
         if (!ApplyHeaders())
+        {
+            OnError();
             return false;
+        }
 
         // Fresh callback per request prevents "Function was not set for event"
         // engine warnings caused by stale callback state from prior requests.
@@ -229,6 +227,8 @@ class GM_RestClient
         m_ActiveCallback.m_OnResponse = m_Callback.m_OnResponse;
         m_ActiveCallback.m_OnError    = m_Callback.m_OnError;
 
+        // Mark even a half-open probe pending until the REST callback finishes.
+        m_bRequestPending = true;
         Print("[GodMode:REST] POST " + GAME_MASTER_ENDPOINT + " bytes=" + gameStateJSON.Length());
         m_Context.POST(m_ActiveCallback, GAME_MASTER_ENDPOINT, gameStateJSON);
         return true;
@@ -237,6 +237,7 @@ class GM_RestClient
     // Call on successful response
     void OnSuccess()
     {
+        m_bRequestPending = false;
         m_iConsecutiveErrors = 0;
         m_fBackoffMultiplier = 1.0;
         m_bConnected = true;
@@ -245,7 +246,9 @@ class GM_RestClient
     // Call on error response
     void OnError()
     {
+        m_bRequestPending = false;
         m_iConsecutiveErrors++;
+        m_iLastFailureTick = System.GetTickCount();
         m_fBackoffMultiplier = Math.Min(m_fBackoffMultiplier * 2.0, MAX_BACKOFF);
     }
 
@@ -260,7 +263,15 @@ class GM_RestClient
 
     // Getters
     GM_RestCallback GetCallback() { return m_Callback; }
-    bool IsConnected() { return m_bConnected && m_iConsecutiveErrors < MAX_CONSECUTIVE_ERRORS; }
+    bool IsConnected()
+    {
+        if (!m_bConnected || m_bRequestPending)
+            return false;
+        if (m_iConsecutiveErrors < MAX_CONSECUTIVE_ERRORS)
+            return true;
+        int elapsed = System.GetTickCount() - m_iLastFailureTick;
+        return elapsed >= m_fBackoffMultiplier * 1000.0;
+    }
     int GetConsecutiveErrors() { return m_iConsecutiveErrors; }
     float GetBackoffMultiplier() { return m_fBackoffMultiplier; }
     string GetBaseURL() { return m_sBaseURL; }

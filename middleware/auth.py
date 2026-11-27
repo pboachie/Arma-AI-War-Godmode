@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import logging
+import math
 import re
 import time
 from collections import deque
@@ -72,29 +73,41 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Bound throughput across both aliases of the authenticated RCON route."""
+    """Bound authenticated game traffic and the two RCON aliases separately."""
 
     RATE_LIMITED_PATHS = {"/api/rcon", "/api/server/rcon"}
 
     def __init__(self, app, max_per_second: int = 5):
         super().__init__(app)
-        self._max = max_per_second
-        self._requests = deque()
+        self._buckets = {
+            "rcon": (deque(), max_per_second, 1.0),
+            "report": (deque(), 4, 10.0),
+            "poll": (deque(), 10, 1.0),
+        }
 
     async def dispatch(self, request: Request, call_next):
-        if request.method != "POST" or _route_path(request) not in self.RATE_LIMITED_PATHS:
+        path = _route_path(request)
+        method = request.method
+        if method == "POST" and path in self.RATE_LIMITED_PATHS:
+            bucket = "rcon"
+        elif (method, path) == ("POST", "/api/game-master"):
+            bucket = "report"
+        elif (method, path) == ("GET", "/api/pending-commands"):
+            bucket = "poll"
+        else:
             return await call_next(request)
 
+        requests, limit, window = self._buckets[bucket]
         now = time.monotonic()
-        while self._requests and now - self._requests[0] >= 1.0:
-            self._requests.popleft()
-        if len(self._requests) >= self._max:
+        while requests and now - requests[0] >= window:
+            requests.popleft()
+        if len(requests) >= limit:
             return JSONResponse(
-                {"detail": f"Rate limit exceeded. Max {self._max} requests/second."},
+                {"detail": "Request rate limit exceeded"},
                 status_code=429,
-                headers={"Retry-After": "1"},
+                headers={"Retry-After": str(max(1, math.ceil(window - (now - requests[0]))))},
             )
-        self._requests.append(now)
+        requests.append(now)
         return await call_next(request)
 
 

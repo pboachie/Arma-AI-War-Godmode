@@ -6,7 +6,8 @@ On every push to upstream `main`, including a merged PR, GitHub Actions tests th
 | --- | --- |
 | `Arma-AI-War-Godmode-<tag>-linux-vps.tar.gz` | Middleware, Docker Compose configuration, and the installer. It builds the middleware image on your VPS. |
 | `Arma-AI-War-Godmode-<tag>-workbench-source.zip` | Enfusion scripts, reference scenario data, and config tooling. No compiled addon, game binaries, or Workshop upload. |
-| `SHA256SUMS` | SHA-256 checksums of the two archives. Both archives also contain `RELEASE.json` with their exact source commit. |
+| `install-linux-vps.sh` | Release-pinned bootstrap that verifies the VPS bundle before running it. |
+| `SHA256SUMS` | SHA-256 checksums of the archives and bootstrap. Both archives also contain `RELEASE.json` with their exact source commit. |
 
 Download the archives you need and `SHA256SUMS` from the same release into one directory. On Linux, verify the files you downloaded before extracting them.
 
@@ -16,7 +17,7 @@ sha256sum --check --strict --ignore-missing SHA256SUMS
 
 On Windows, use `Get-FileHash -Algorithm SHA256` on the ZIP and compare the result with its entry in `SHA256SUMS`.
 
-For the middleware, extract the VPS archive and run `bash scripts/install-vps.sh` from its extracted directory. It uses the same Linux and Docker prerequisites as the [VPS quick start](../README.md#start-the-middleware-on-a-linux-vps), but you do not need Git to install from an archive. For the addon, follow the [Workbench guide](WORKBENCH_SETUP.md) and test against the intended game build.
+For the middleware, use the published bootstrap or extract the VPS archive and run `bash scripts/install-vps.sh` from it. Use the archive directly for older releases without a bootstrap. Neither release path needs Git. The moving `main` source tree is for development, not the release-qualified install path. For the addon, follow the [Workbench guide](WORKBENCH_SETUP.md) and test against the intended game build. [VPS prerequisites](../README.md#start-the-middleware-on-a-linux-vps)
 
 ## Retry a failed release
 

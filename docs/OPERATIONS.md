@@ -16,6 +16,8 @@ docker compose --env-file middleware/.env logs --tail=80 middleware
 
 Use `/api/health` with the admin key or check the dashboard via its [SSH tunnel](../README.md#open-the-dashboard) for details. The dashboard page can load without the admin key, but its protected data calls require the key. Check that the published middleware port is on `127.0.0.1` only and no game or RCON ports are published by Compose. If you changed `GODMODE_PORT`, use the matching host port for health checks, the tunnel destination, and the game bridge. Review logs privately and redact them before sharing. Docker inspection and resolved Compose configuration can reveal credentials.
 
+For an install from a release archive, read the source SHA and tag from `RELEASE.json` instead of using Git.
+
 ## Back up
 
 1. Record the running source SHA, middleware image ID or digest, configured ports, dedicated-server build, and exact trusted addon versions. Keep this inventory separate from credentials.
@@ -34,6 +36,8 @@ Use `/api/health` with the admin key or check the dashboard via its [SSH tunnel]
    ```
 
 3. Verify that the port is still loopback-only, admin access still works, and the game bridge can submit an authenticated report if in use. If provider calls are enabled, verify them in a private match and check usage. Update the game installation and addons separately during a planned game maintenance window, with matching client and server versions.
+
+For an archive install, verify the new download and extract it into a separate temporary directory first. After backing up and stopping the stack, update the application files in the original deployment directory. Preserve `middleware/.env`, keep the same directory path and Compose volume, and rerun the installer there. [Release downloads and checksums](RELEASES.md)
 
 ## Record a replay for troubleshooting
 

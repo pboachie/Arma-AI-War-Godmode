@@ -6,9 +6,13 @@ The repository supplies Enfusion source, the FastAPI middleware and dashboard, a
 
 ## Start the middleware on a Linux VPS
 
-You need Git, Bash, curl, and a local [Docker Engine](https://docs.docker.com/engine/install/) (28 or newer for loopback publishing) with a [Compose v2 plugin](https://docs.docker.com/compose/install/linux/) that supports `up --wait-timeout`. Connect to Docker over a local Unix socket with an account already authorized to use it. Docker daemon access is privileged.
+For a versioned download, use the Linux VPS bundle and `SHA256SUMS` from [GitHub Releases](https://github.com/pboachie/Arma-AI-War-Godmode/releases). Extract the verified bundle and run `bash scripts/install-vps.sh` from it. A separate Workbench source ZIP is available on the same release. [Release packages and verification](docs/RELEASES.md)
 
-Once the installer is available upstream, run this from a directory you control on the VPS. It downloads the bootstrap, clones `main` into `./Arma-AI-War-Godmode`, and starts the middleware without replacing an existing checkout.
+For the clone-and-install option below, you also need Git and curl.
+
+Both options need Bash and a local [Docker Engine](https://docs.docker.com/engine/install/) (28 or newer for loopback publishing) with a [Compose v2 plugin](https://docs.docker.com/compose/install/linux/) that supports `up --wait-timeout`. Connect to Docker over a local Unix socket with an account already authorized to use it. Docker daemon access is privileged.
+
+Run the command below from a directory you control on the VPS. It downloads the bootstrap, clones `main` into `./Arma-AI-War-Godmode`, and starts the middleware without replacing an existing checkout.
 
 ```bash
 ( installer=$(mktemp) && trap 'rm -f -- "$installer"' EXIT && curl -q --proto '=https' --proto-redir '=https' -fsSL -o "$installer" https://raw.githubusercontent.com/pboachie/Arma-AI-War-Godmode/main/scripts/bootstrap-vps.sh && bash "$installer" )

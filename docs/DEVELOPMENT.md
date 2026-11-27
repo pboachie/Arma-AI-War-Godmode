@@ -15,6 +15,17 @@ for script in scripts/bootstrap-vps.sh scripts/install-vps.sh middleware/start.s
 
 These checks use synthetic game data and no model credentials. The middleware health check only tests liveness. Before making claims about in-game integration, also compile the addon in Workbench and test an authenticated request and a visible game response with the intended game build. [Workbench guide](WORKBENCH_SETUP.md)
 
+## Preview release packages locally
+
+The packager uses only allowlisted files from a committed revision. It does not read local settings, upload artifacts, or create a tag. Use a new output directory for each run.
+
+```bash
+python scripts/package_release.py --commit "$(git rev-parse HEAD)" --tag v0.0.0 --output dist/release-smoke
+(cd dist/release-smoke && sha256sum --check --strict SHA256SUMS)
+```
+
+The GitHub Actions check installs the tested VPS archive on a disposable runner. See the [release guide](RELEASES.md) for publishing, reruns, and fork permissions.
+
 ## Update the middleware image inputs
 
 Review upstream release notes before updating `middleware/requirements.in` or the Python image digest in `middleware/Dockerfile`. Use a trusted installation of `uv` to regenerate the Python lock:

@@ -1,0 +1,97 @@
+name: Publish release
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  verify:
+    # Repository IDs are unique, including across forks.
+    if: ${{ github.repository_id == '1272470462' && github.event_name == 'push' && github.ref == 'refs/heads/main' && !github.event.deleted }}
+    uses: ./.github/workflows/checks.yml
+    permissions:
+      contents: read
+    with:
+      release_tag: v3.0.${{ github.run_number }}
+
+  publish:
+    if: ${{ github.repository_id == '1272470462' && github.event_name == 'push' && github.ref == 'refs/heads/main' && !github.event.deleted }}
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # Same run only. Never check out a branch, execute a downloaded file, or
+      # consume an artifact from a pull_request run in this job.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-${{ github.sha }}
+          path: ${{ runner.temp }}/tested-release
+      - name: Tag the checked commit and publish its verified downloads
+        shell: bash
+        working-directory: ${{ runner.temp }}/tested-release
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+        run: |
+          fail() { printf '%s\n' "$*" >&2; exit 1; }
+          [[ $GITHUB_SHA =~ ^[0-9a-f]{40}$ && $RELEASE_TAG =~ ^v[0-9]+\.[0-9]+\.[1-9][0-9]*$ ]] \
+            || fail 'Invalid release revision or tag.'
+          prefix="Arma-AI-War-Godmode-$RELEASE_TAG"
+          assets=("$prefix-linux-vps.tar.gz" "$prefix-workbench-source.zip" SHA256SUMS)
+          for asset in "${assets[@]}"; do
+            [[ -s $asset && -f $asset && ! -L $asset ]] || fail "Missing release asset: $asset"
+          done
+          sha256sum -- "${assets[@]:0:2}" | cmp -s - SHA256SUMS \
+            || fail 'The tested asset checksums did not match.'
+
+          api="repos/$GH_REPO"
+          tag_ref="refs/tags/$RELEASE_TAG"
+          tag_target() {
+            gh api "$api/git/matching-refs/tags/$RELEASE_TAG" \
+              | jq -r --arg ref "$tag_ref" '.[] | select(.ref == $ref) | "\(.object.type) \(.object.sha)"'
+          }
+          existing=$(tag_target)
+          if [[ -z $existing ]]; then
+            gh api --method POST "$api/git/refs" -f ref="$tag_ref" -f sha="$GITHUB_SHA" >/dev/null
+          elif [[ $existing != "commit $GITHUB_SHA" ]]; then
+            fail "Tag $RELEASE_TAG already points elsewhere. It was not moved."
+          fi
+
+          release=$(gh api --paginate "$api/releases?per_page=100" | jq -sc --arg tag "$RELEASE_TAG" '
+            [.[][] | select(.tag_name == $tag)]
+            | if length > 1 then error("multiple releases for this tag") elif length == 1 then .[0] else empty end')
+          if [[ -z $release ]]; then
+            release=$(gh api --method POST "$api/releases" -f tag_name="$RELEASE_TAG" \
+              -f target_commitish="$GITHUB_SHA" -f name="Arma AI War $RELEASE_TAG" \
+              -F draft=true -F generate_release_notes=true)
+          fi
+
+          verify_assets() {
+            local details=$1 file digest
+            for file in "${assets[@]}"; do
+              digest=$(sha256sum -- "$file")
+              jq -e --arg name "$file" --arg digest "sha256:${digest%% *}" \
+                'any(.assets[]; .name == $name and .state == "uploaded" and .digest == $digest)' \
+                <<< "$details" >/dev/null || fail "GitHub did not confirm the uploaded bytes for $file."
+            done
+          }
+
+          if jq -e '.draft == false' <<< "$release" >/dev/null; then
+            verify_assets "$release"
+            printf 'Release %s already published. No tags or assets were changed.\n' "$RELEASE_TAG"
+            exit 0
+          fi
+          jq -e --arg tag "$RELEASE_TAG" '.draft == true and .tag_name == $tag' \
+            <<< "$release" >/dev/null || fail 'Refusing to modify an unexpected release.'
+          release_id=$(jq -er '.id | numbers' <<< "$release")
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$GH_REPO" --clobber
+          uploaded=$(gh api "$api/releases/$release_id")
+          verify_assets "$uploaded"
+          [[ $(tag_target) == "commit $GITHUB_SHA" ]] || fail 'Release tag no longer points to the tested commit.'
+          gh api --method PATCH "$api/releases/$release_id" \
+            -F draft=false -f make_latest=legacy --jq .html_url

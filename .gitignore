@@ -84,6 +84,7 @@ middleware/last_invalid_*.bin
 # ─────────────────────────────────────────────
 # Installers / large binaries
 # ─────────────────────────────────────────────
+/dist/
 *.exe
 *.zip
 *.7z

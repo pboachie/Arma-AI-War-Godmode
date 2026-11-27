@@ -22,6 +22,8 @@ For recovery testing, stop the private middleware long enough to trigger the ret
 
 Keep the Workbench projects out of the public repository. On Windows with matching Reforger retail, dedicated server, Workbench, and the middleware test dependencies, run `tests/verify_local_side_operations.py` with `--pilot <private-evidence-directory>` and either `--source <split-project-parent>` to pack both projects or `--addons <packed-addon-parent>` to verify existing packs. The harness loads each case into its own loopback-only profile, verifies the actual package mounts and a legacy command round-trip, and records non-player telemetry and package hashes. Its default mode disables the model. Use `--case everon --manual-client --fixture-model` to hold a match for a player with deterministic model responses. The script prints a matching client launch command and the local join address after the server is ready.
 
+If the retail server browser cannot look up the loopback address, add `--lan-address <this-computer-private-IP>` to that manual Everon test. It registers the game on that specific interface, keeps it unlisted with a temporary match password, and leaves the middleware on loopback.
+
 Before using a new build on a player server, check a private match with the exact candidate packs:
 
 1. Stock Conflict must still play normally and report no side-operation routes. Everon should advertise its authored routes but should not receive a start while no eligible player is in game.

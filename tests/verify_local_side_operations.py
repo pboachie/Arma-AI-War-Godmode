@@ -9,6 +9,7 @@ import argparse
 from contextlib import ExitStack, contextmanager
 from hashlib import file_digest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import IPv4Address, IPv4Network
 import json
 import os
 from pathlib import Path
@@ -31,9 +32,9 @@ EVERON_MISSION = "{A485A1003778460A}Missions/AI_War_Everon.conf"
 PACK_FILES = ("addon.gproj", "data.pak", "resourceDatabase.rdb")
 
 
-def free_port(kind):
+def free_port(kind, address="127.0.0.1"):
     with socket.socket(socket.AF_INET, kind) as sock:
-        sock.bind(("127.0.0.1", 0))
+        sock.bind((address, 0))
         return sock.getsockname()[1]
 
 
@@ -204,7 +205,8 @@ def check_game(args, steam, addons, lane, name, origin, game_key, admin):
     keypath = profile / "godmode_api_key.txt"
     keypath.write_bytes((game_key + "\r\n").encode("ascii"))
     (profile / "godmode_server_url.txt").write_bytes((origin + "\r\n").encode("ascii"))
-    gport = free_port(socket.SOCK_DGRAM)
+    listen_address = args.lan_address or "127.0.0.1"
+    gport = free_port(socket.SOCK_DGRAM, listen_address)
     qport = free_port(socket.SOCK_DGRAM)
     while qport == gport:
         qport = free_port(socket.SOCK_DGRAM)
@@ -215,11 +217,15 @@ def check_game(args, steam, addons, lane, name, origin, game_key, admin):
     if not stock:
         addons_needed.append({"modId": EVERON_ID, "name": "AI War - Everon"})
     cfg = json.loads((ROOT / "Configs/ArmaServer/config.template.json").read_text())
-    cfg.update(bindPort=gport, publicPort=gport)
+    cfg.update(bindAddress=listen_address, bindPort=gport, publicPort=gport)
+    if args.lan_address:
+        cfg["publicAddress"] = listen_address
     cfg["a2s"]["port"] = qport
     cfg["game"].update(name="AI War Side Operations (local qualification)",
                        scenarioId=scenario_id, maxPlayers=4, mods=addons_needed,
                        passwordAdmin=secrets.token_urlsafe(18))
+    if args.lan_address:
+        cfg["game"].update(visible=False, password=secrets.token_urlsafe(12))
     cfg["game"]["gameProperties"]["battlEye"] = False
     cfgfile = case / "config.json"
     cfgfile.write_text(json.dumps(cfg), encoding="ascii")
@@ -242,7 +248,7 @@ def check_game(args, steam, addons, lane, name, origin, game_key, admin):
                 scripts = traces(case, "script.log")
                 console = traces(case, "console.log")
                 listen = [line for line in console.splitlines() if "Starting RPL server, listening" in line]
-                if any(f"127.0.0.1:{gport}," not in line for line in listen):
+                if any(f"{listen_address}:{gport}," not in line for line in listen):
                     raise RuntimeError("Dedicated server did not honor the private bind address")
                 response_applied = with_fixture or (marker in scripts and "[GodMode:Weather] Time" in scripts)
                 if response_applied and listen and scenario_id in console:
@@ -292,7 +298,9 @@ def check_game(args, steam, addons, lane, name, origin, game_key, admin):
                                                                     cwd=game_binary.parent, visible=True))
                     else:
                         client = None
-                    print(f"Private match is ready for Direct Join at 127.0.0.1:{gport}", flush=True)
+                    print(f"Private match is ready for Direct Join at {listen_address}:{gport}", flush=True)
+                    if args.lan_address:
+                        print(f"Disposable match password: {cfg['game']['password']}", flush=True)
                     if args.manual_client:
                         quoted = ("'" + value.replace("'", "''") + "'" for value in client_args)
                         print("Matching client (PowerShell): & " + " ".join(quoted), flush=True)
@@ -324,6 +332,7 @@ def main():
     clients = parser.add_mutually_exclusive_group()
     clients.add_argument("--client", action="store_true", help="Launch the retail client in the Everon test")
     clients.add_argument("--manual-client", action="store_true", help="Hold the test lane for a user-launched client")
+    parser.add_argument("--lan-address", help="Register a passworded manual playtest on a local RFC 1918 interface")
     parser.add_argument("--client-menu", action="store_true", help="Start at the menu for manual direct join")
     parser.add_argument("--fixture-model", action="store_true", help="Exercise the local provider bridge with fixture choices")
     parser.add_argument("--client-seconds", type=int, default=180)
@@ -331,6 +340,16 @@ def main():
     args = parser.parse_args()
     if args.client_menu and not args.client:
         parser.error("--client-menu requires --client")
+    if args.lan_address:
+        if not args.manual_client or args.case != "everon":
+            parser.error("--lan-address requires --case everon --manual-client")
+        try:
+            address = IPv4Address(args.lan_address)
+            lan_ranges = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+            if not any(address in IPv4Network(network) for network in lan_ranges):
+                raise ValueError
+        except ValueError:
+            parser.error("--lan-address must be a private LAN IPv4 address")
     if args.fixture_model and args.baseline:
         parser.error("The fixture model requires the side-operation-capable candidate")
     if os.name != "nt":

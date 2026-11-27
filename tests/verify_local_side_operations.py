@@ -276,19 +276,27 @@ def check_game(args, steam, addons, lane, name, origin, game_key, admin):
             print(f"PASS {name} smoke: exact packed game, authenticated bridge, "
                   f"{marker_result}{routes} side-operation routes", flush=True)
 
-            if args.client and not stock:
+            if (args.client or args.manual_client) and not stock:
                 client_profile = lane / "client"
                 game_binary = steam / "Arma Reforger/ArmaReforgerSteam.exe"
                 client_args = [str(game_binary), "-addonsDir", str(addons), "-addons", EVERON_ID,
                                "-profile", str(client_profile),
                                "-window", "-screenWidth", "1200", "-screenHeight", "720"]
-                if not args.client_menu:
+                if args.client and not args.client_menu:
                     client_args.extend(["-client", f"127.0.0.1:{gport}"])
-                with process(client_args, lane / "client-stdout.log", cwd=game_binary.parent,
-                             visible=True) as client:
-                    print(f"Client started for loopback UDP {gport}, profile {client_profile}", flush=True)
+                with ExitStack() as client_stack:
+                    if args.client:
+                        client = client_stack.enter_context(process(client_args, lane / "client-stdout.log",
+                                                                    cwd=game_binary.parent, visible=True))
+                    else:
+                        client = None
+                    print(f"Private match is ready for Direct Join at 127.0.0.1:{gport}", flush=True)
+                    if args.manual_client:
+                        quoted = ("'" + value.replace("'", "''") + "'" for value in client_args)
+                        print("Matching client (PowerShell): & " + " ".join(quoted), flush=True)
                     hold_end = time.monotonic() + args.client_seconds
-                    while time.monotonic() < hold_end and server.poll() is None and client.poll() is None:
+                    while (time.monotonic() < hold_end and server.poll() is None
+                           and (client is None or client.poll() is None)):
                         state = api(origin, "/api/game-state", key=admin)["state"]
                         if state is not None:
                             snapshot = state_view(state)
@@ -311,7 +319,9 @@ def main():
     builds.add_argument("--addons", type=Path, help="Parent of existing packs (AIWar and AIWarEveron)")
     parser.add_argument("--baseline", action="store_true", help="Existing release with no side operations")
     parser.add_argument("--case", choices=["stock", "everon", "both"], default="both")
-    parser.add_argument("--client", action="store_true", help="Launch the retail client in the Everon test")
+    clients = parser.add_mutually_exclusive_group()
+    clients.add_argument("--client", action="store_true", help="Launch the retail client in the Everon test")
+    clients.add_argument("--manual-client", action="store_true", help="Hold the test lane for a user-launched client")
     parser.add_argument("--client-menu", action="store_true", help="Start at the menu for manual direct join")
     parser.add_argument("--fixture-model", action="store_true", help="Exercise the local provider bridge with fixture choices")
     parser.add_argument("--client-seconds", type=int, default=180)

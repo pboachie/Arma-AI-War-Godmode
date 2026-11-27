@@ -16,6 +16,19 @@ These checks use synthetic game data and no model credentials. The middleware he
 
 For recovery testing, stop the private middleware long enough to trigger the retry cooldown, then start it again. Verify that reporting resumes without restarting the game server.
 
+## Qualify Everon side operations
+
+Keep the Workbench projects out of the public repository. On Windows with matching Reforger retail, dedicated server, Workbench, and the middleware test dependencies, run `tests/verify_local_side_operations.py` with `--pilot <private-evidence-directory>` and either `--source <split-project-parent>` to pack both projects or `--addons <packed-addon-parent>` to verify existing packs. The harness loads each case into its own loopback-only profile, verifies the actual package mounts and a legacy command round-trip, and records non-player telemetry and package hashes. Its default mode disables the model. Use `--case everon --client` for a visible join check.
+
+Before using a new build on a player server, check a private match with the exact candidate packs:
+
+1. Stock Conflict must still play normally and report no side-operation routes. Everon should advertise its authored routes but should not receive a start while no eligible player is in game.
+2. Join Everon and spawn on the supported faction. Confirm a native task and pickup marker are visible to that faction. Confirm the other faction does not receive the task.
+3. Pick up and deliver the operation cargo in the game. Verify that only this cargo advances the task, the pickup marker moves to the delivery site, and playthrough reports the completed operation under the original ID. A defense follow-up must use the same route and reference the reported success. An ignored or failed run must not start that defense.
+4. Interrupt the private middleware after task acceptance. Players should still be able to finish, and the authoritative terminal result should reach middleware after reconnect without opening a duplicate task. Retain game and middleware evidence without credentials or player identifiers.
+
+Mark compile, boot, client join, cargo delivery, and model decisions separately. An authenticated report or deterministic provider stub does not prove a live model-driven round. Always keep the game and clients on matching packs, including when testing private packs instead of Workshop builds.
+
 ## Preview release packages locally
 
 The packager uses only allowlisted files from a committed revision. It does not read local settings, upload artifacts, or create a tag. Use a new output directory for each run.

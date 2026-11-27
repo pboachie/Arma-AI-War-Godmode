@@ -84,11 +84,13 @@ def pack(steam, source, lane):
         destination.mkdir(parents=True)
         profile = lane / ("workbench-" + name)
         with process([str(workbench), "-gproj", str(source / name / "addon.gproj"),
-                      "-addonsDir", f"{retail_data},{source}", "-profile", str(profile),
-                      "-wbModule", "ResourceManager", "-packAddon", "-packAddonDir", str(destination)],
+                      "-addonsDir", f"{retail_data.as_posix()},{source}", "-profile", str(profile),
+                      "-exitAfterInit", "-wbModule=ResourceManager", "-packAddon", "-packAddonDir", str(destination)],
                      lane / (name + "-pack.log"), cwd=workbench.parent) as child:
             if child.wait(120) != 0:
                 raise RuntimeError(f"{name} Workbench pack failed, exit {child.returncode}")
+        if any(not (destination / item).is_file() for item in PACK_FILES):
+            raise RuntimeError(f"{name} Workbench exited without creating a complete addon pack")
         print(f"Packed {name}", flush=True)
     return packs
 

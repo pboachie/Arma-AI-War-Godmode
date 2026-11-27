@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Optional
 import os
+import re
+import shlex
 import signal
 import shutil
 import subprocess
@@ -28,8 +30,6 @@ USE_EXPERIMENTAL = os.environ.get("USE_EXPERIMENTAL", "false").lower() in (
     "1",
     "yes",
 )
-STEAM_USER = os.environ.get("STEAM_USER", "").strip()
-STEAM_PASS = os.environ.get("STEAM_PASS", "").strip()
 STARTUP_PARAMETERS = os.environ.get("STARTUP_PARAMETERS", "")
 
 
@@ -53,7 +53,7 @@ LOCAL_ADDON_SOURCE_ROOT = Path(
 )
 LOCAL_ADDON_SCRIPTS_SOURCE = LOCAL_ADDON_SOURCE_ROOT / "scripts" / "Game"
 LOCAL_ADDON_CONFIGS_SOURCE = LOCAL_ADDON_SOURCE_ROOT / "Configs"
-LOCAL_ADDON_ENABLED = _env_flag("ARMA_LOCAL_ADDON_ENABLED", True)
+LOCAL_ADDON_ENABLED = _env_flag("ARMA_LOCAL_ADDON_ENABLED")
 LOCAL_ADDON_ID = os.environ.get("ARMA_LOCAL_ADDON_ID", "").strip()
 LOCAL_ADDON_NAME = (
     os.environ.get("ARMA_LOCAL_ADDON_NAME", "").strip()
@@ -113,29 +113,19 @@ def update_server():
         flush=True,
     )
 
-    # Arma Reforger Dedicated Server requires authenticated login
-    if STEAM_USER:
-        login_args = ["+login", STEAM_USER, STEAM_PASS]
-    else:
-        print(
-            "[launcher] WARNING: No STEAM_USER set — trying anonymous login. "
-            "Arma Reforger DS typically requires authentication.",
-            flush=True,
-        )
-        login_args = ["+login", "anonymous"]
-
     cmd = [
         STEAMCMD_PATH,
         "+force_install_dir",
         INSTALL_DIR,
-        *login_args,
+        "+login",
+        "anonymous",
         "+app_update",
         str(app_id),
         "validate",
         "+quit",
     ]
 
-    result = subprocess.run(cmd, stdout=sys.stdout, stderr=sys.stderr)
+    result = subprocess.run(cmd, stdout=sys.stdout, stderr=sys.stderr, env=_child_env())
     if result.returncode != 0:
         print(
             f"[launcher] WARNING: SteamCMD exited with code {result.returncode}",
@@ -151,12 +141,17 @@ def update_server():
             flush=True,
         )
         print(
-            "[launcher] SteamCMD likely failed to download. "
-            "Set STEAM_USER and STEAM_PASS environment variables "
-            "with a Steam account that owns Arma Reforger.",
+            "[launcher] Check SteamCMD output and the official Arma Reforger hosting guide.",
             flush=True,
         )
         sys.exit(1)
+
+
+def _child_env() -> dict[str, str]:
+    # The combined image also contains provider, middleware and game bridge
+    # credentials. Neither SteamCMD nor the game needs them in its environment.
+    return {name: value for name, value in os.environ.items()
+            if name in {"HOME", "PATH", "USER", "LOGNAME", "LANG", "TZ"} or name.startswith("LC_")}
 
 
 def _copy_tree_contents(source: Path, target: Path) -> bool:
@@ -166,13 +161,19 @@ def _copy_tree_contents(source: Path, target: Path) -> bool:
     """
     if not source.is_dir():
         return False
+    if source.is_symlink() or any(path.is_symlink() for path in source.rglob("*")):
+        raise ValueError("Local addon staging requires a source tree without symlinks")
+    if target.resolve() != target:
+        raise ValueError("Local addon target must not traverse a symlink")
 
     target.mkdir(parents=True, exist_ok=True)
     copied = False
 
     for entry in source.iterdir():
         destination = target / entry.name
-        if destination.exists():
+        if destination.is_symlink():
+            destination.unlink()
+        elif destination.exists():
             if destination.is_dir():
                 shutil.rmtree(destination)
             else:
@@ -189,11 +190,17 @@ def _copy_tree_contents(source: Path, target: Path) -> bool:
 
 def stage_local_addon() -> Optional[str]:
     """Copy local addon sources into the dedicated server's addon search path."""
-    addon_id = LOCAL_ADDON_ID or LOCAL_ADDON_NAME
-    if not LOCAL_ADDON_ENABLED or not addon_id:
+    if not LOCAL_ADDON_ENABLED:
         return None
+    if not re.fullmatch(r"[0-9a-fA-F]{16}", LOCAL_ADDON_ID):
+        raise ValueError("ARMA_LOCAL_ADDON_ID must be the 16-digit Workbench project GUID")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", LOCAL_ADDON_NAME):
+        raise ValueError("ARMA_LOCAL_ADDON_NAME must be a simple directory name")
+    addon_id = LOCAL_ADDON_ID
 
     addon_root = Path(PROFILE_ADDONS_DIR) / LOCAL_ADDON_NAME
+    if addon_root.resolve() != addon_root:
+        raise ValueError("Local addon target must not traverse a symlink")
     staged_any = False
 
     if LOCAL_ADDON_SCRIPTS_SOURCE.is_dir():
@@ -257,6 +264,8 @@ def launch_server():
     """Start the Arma Reforger dedicated server binary and return the process."""
     global server_process
 
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", CONFIG):
+        raise ValueError("CONFIG must be a config basename without a file extension")
     config_path = os.path.join(CONFIG_DIR, f"{CONFIG}.json")
     if not os.path.isfile(config_path):
         print(
@@ -299,9 +308,9 @@ def launch_server():
     # Local addons are discovered automatically via -addonsDir (they need a .gproj).
 
     if STARTUP_PARAMETERS:
-        cmd.extend(STARTUP_PARAMETERS.split())
+        cmd.extend(shlex.split(STARTUP_PARAMETERS))
 
-    print(f"[launcher] Starting server: {' '.join(cmd)}", flush=True)
+    print("[launcher] Starting Arma Reforger dedicated server", flush=True)
 
     # Run from install dir so ./addons resolves to the game's built-in addons
     server_process = subprocess.Popen(
@@ -309,6 +318,7 @@ def launch_server():
         stdout=sys.stdout,
         stderr=sys.stderr,
         cwd=INSTALL_DIR,
+        env=_child_env(),
         preexec_fn=os.setsid,
     )
 

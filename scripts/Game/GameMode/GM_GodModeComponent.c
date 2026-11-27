@@ -15,10 +15,10 @@ class GM_GodModeComponent : SCR_BaseGameModeComponent
     [Attribute("30", UIWidgets.Slider, desc: "Seconds between LLM updates", params: "5 300 1")]
     protected float m_fUpdateInterval;
 
-    [Attribute("http://localhost:8080", desc: "FastAPI middleware server URL")]
+    [Attribute("http://127.0.0.1:8080", desc: "Dedicated-server middleware URL")]
     protected string m_sServerURL;
 
-    [Attribute("1", desc: "Enable LLM communication (0=offline mode)")]
+    [Attribute("1", desc: "Enable dedicated-server middleware communication (0=offline mode)")]
     protected bool m_bLLMEnabled;
 
     [Attribute("30", desc: "Max AI squads allowed")]
@@ -91,8 +91,7 @@ class GM_GodModeComponent : SCR_BaseGameModeComponent
         if (!Replication.IsServer()) return;
 
         Print("[GodMode] =============================================");
-        Print("[GodMode] AI War -- 100% LLM-Managed Gamemode Starting [GM_REV_20260321_B]");
-        Print("[GodMode] No admins. No scripts. Pure AI command.");
+        Print("[GodMode] AI War game mode starting");
         Print("[GodMode] =============================================");
 
         // Initialize all sub-managers
@@ -138,7 +137,7 @@ class GM_GodModeComponent : SCR_BaseGameModeComponent
             {
                 m_RestClient.GetCallback().m_OnResponse.Insert(OnLLMResponse);
                 m_RestClient.GetCallback().m_OnError.Insert(OnLLMError);
-                Print("[GodMode] REST client connected -> " + m_RestClient.GetBaseURL() +
+                Print("[GodMode] REST client initialized -> " + m_RestClient.GetBaseURL() +
                       " [" + m_RestClient.GetRevisionTag() + "]");
             }
             else
@@ -149,7 +148,7 @@ class GM_GodModeComponent : SCR_BaseGameModeComponent
         }
         else
         {
-            Print("[GodMode] LLM disabled — running in offline mode");
+            Print("[GodMode] Middleware communication disabled — running in offline mode");
         }
 
         m_bInitialized = true;
@@ -374,7 +373,8 @@ class GM_GodModeComponent : SCR_BaseGameModeComponent
 
         state.Pack();
         string json = state.AsString();
-        m_RestClient.SendSITREP(json);
+        if (!m_RestClient.SendSITREP(json))
+            return;
 
         // Clear event log after sending
         m_aRecentEvents.Clear();
@@ -620,7 +620,7 @@ class GM_GodModeComponent : SCR_BaseGameModeComponent
             {
                 // Server returns empty commands during async warmup (first 1-2 SITREPs)
                 // or when the LLM pipeline is still processing. This is expected.
-                Print("[GodMode] No commands this cycle (LLM processing in background)");
+                Print("[GodMode] No middleware commands this cycle");
                 return;
             }
 

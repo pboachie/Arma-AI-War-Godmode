@@ -1,41 +1,13 @@
-# Version control
-.git
-.gitignore
-
-# IDE and editor files
-.vscode
-.idea
-*.swp
-*.swo
-*~
-
-# Test files (not needed in production image)
-test_server.py
-__pycache__
-*.pyc
-.pytest_cache
-
-# Docker files (prevent recursive build context)
-Dockerfile
-docker-compose.yml
-.dockerignore
-
-# Documentation
-*.md
-LICENSE
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Logs and data (mounted as volumes)
-replays/
-logs/
-battle_summaries/
-*.log
-*.jsonl
-*.jsonl.gz
-
-# Environment files with secrets
-.env
-.env.*
+# Allow only the inputs explicitly required for the middleware image.
+**
+!requirements.txt
+!server.py
+!agents.py
+!scaling_engine.py
+!tactical_objectives.py
+!auth.py
+!dashboard.html
+!server_integration.py
+!server_manager.py
+!rcon_client.py
+!a2s_client.py

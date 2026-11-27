@@ -6,7 +6,7 @@ SubScene {
    components {
     GM_GodModeComponentClass "{FFFFFFFFFFFFFFFF}" {
      m_fUpdateInterval 30
-     m_sServerURL "http://localhost:8080"
+     m_sServerURL "http://127.0.0.1:8080"
      m_bLLMEnabled 1
      m_iMaxSquads 30
      m_iMaxVehicles 20

@@ -12,12 +12,13 @@ Advanced features:
   - Provider fallbacks: Auto-switch if primary LLM fails
 
 Supports LLM providers:
+  - Disabled (default)  → LLM_PROVIDER=disabled
   - Anthropic (Claude)  → LLM_PROVIDER=anthropic  ANTHROPIC_API_KEY=sk-ant-...
   - OpenAI (GPT)        → LLM_PROVIDER=openai     OPENAI_API_KEY=sk-...
   - Z.AI GLM (Coding)   → LLM_PROVIDER=glm        GLM_API_KEY=...
   - Ollama (local)      → LLM_PROVIDER=ollama      (no key needed)
 
-Run:  uvicorn server:app --host 0.0.0.0 --port 8080
+Run locally:  python server.py
 """
 
 import asyncio
@@ -28,11 +29,14 @@ import time
 import logging
 import os
 import re
+import secrets
+import tempfile
 import uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 from tactical_objectives import generate_tactical_objectives as _tac_obj_impl
 from tactical_objectives import inject_tactical_intel as _tac_intel_impl
 
@@ -55,8 +59,9 @@ from agents import AgentOrchestrator, create_orchestrator
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
+from auth import APIKeyMiddleware, RateLimitMiddleware, SecurityHeadersMiddleware
 
 # ─── LangChain imports ───
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -71,17 +76,27 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("godmode")
+for http_logger in ("httpx", "httpx2"):
+    logging.getLogger(http_logger).setLevel(logging.WARNING)
 
 # ─── Config ───
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "glm")
-MODEL_NAME = os.getenv("LLM_MODEL", "glm-4.7")
-MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "128000"))
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "disabled").strip().lower() or "disabled"
+MODEL_NAME = os.getenv("LLM_MODEL", "").strip()
+MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2000"))
 MAX_HISTORY = int(os.getenv("MAX_HISTORY", "20"))
-MEMORY_TOKEN_LIMIT = int(os.getenv("MEMORY_TOKEN_LIMIT", "190000"))
+MEMORY_TOKEN_LIMIT = int(os.getenv("MEMORY_TOKEN_LIMIT", "32000"))
 
 # Fallback provider
 FALLBACK_PROVIDER = os.getenv("FALLBACK_PROVIDER", "")
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "")
+
+_SOURCE_DIR = Path(__file__).resolve().parent
+_STATE_DIR = Path(os.getenv("GODMODE_STATE_DIR") or _SOURCE_DIR).resolve()
+_SERVER_CONTROL_ENABLED = os.getenv("SERVER_CONTROL_ENABLED", "false").strip().lower() in ("true", "1", "yes")
+
+
+def _llm_enabled() -> bool:
+    return LLM_PROVIDER != "disabled"
 
 # GLM-specific
 GLM_BASE_URL = os.getenv("GLM_BASE_URL", "https://api.z.ai/api/coding/paas/v4/")
@@ -99,16 +114,19 @@ COMPACTION_THRESHOLD = int(os.getenv("COMPACTION_THRESHOLD", "12"))
 
 # Provider defaults
 _PROVIDER_DEFAULT_MODELS = {
-    "anthropic": "claude-sonnet-4-6-20250627",
+    "anthropic": "claude-sonnet-4-6",
     "openai": "gpt-4o",
     "openrouter": "nvidia/nemotron-3-nano-30b-a3b:free",
     "glm": "glm-4.7",
     "ollama": "llama3.1",
 }
-if os.getenv("LLM_MODEL") is None:
+if not MODEL_NAME:
     MODEL_NAME = _PROVIDER_DEFAULT_MODELS.get(LLM_PROVIDER, MODEL_NAME)
 if FALLBACK_PROVIDER and not FALLBACK_MODEL:
     FALLBACK_MODEL = _PROVIDER_DEFAULT_MODELS.get(FALLBACK_PROVIDER, "")
+if not _llm_enabled():
+    MODEL_NAME = None
+    FALLBACK_PROVIDER = FALLBACK_MODEL = ""
 
 # ─── LLM Retry / Rate-Limit Config ───
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "5"))
@@ -122,11 +140,9 @@ import random
 
 # ─── Server Integration (optional) ───
 try:
-    import server_integration as _server_int
     from server_integration import router as server_router, init_services, shutdown_services
     _HAS_SERVER_INTEGRATION = True
 except ImportError:
-    _server_int = None
     _HAS_SERVER_INTEGRATION = False
 
 # ─── RCON Client (optional) ───
@@ -137,7 +153,7 @@ except ImportError:
     _HAS_RCON = False
 
 # ─── RCON Configuration ───
-# Whitelist of command prefixes the LLM is allowed to send via RCON.
+# Whitelist of commands administrators can explicitly send via RCON.
 # '#shutdown' is excluded by default unless RCON_ALLOW_SHUTDOWN=true.
 _RCON_ALLOWED_PREFIXES: set[str] = {"#kick", "#ban", "#restart", "kick", "addban", "ban",
                                      "say", "players", "admins", "missions", "loadban",
@@ -145,7 +161,7 @@ _RCON_ALLOWED_PREFIXES: set[str] = {"#kick", "#ban", "#restart", "kick", "addban
 _RCON_ALLOW_SHUTDOWN = os.getenv("RCON_ALLOW_SHUTDOWN", "false").lower() in ("true", "1", "yes")
 if _RCON_ALLOW_SHUTDOWN:
     _RCON_ALLOWED_PREFIXES.add("#shutdown")
-_RCON_ENABLED = os.getenv("RCON_ENABLED", "true").lower() in ("true", "1", "yes")
+_RCON_ENABLED = os.getenv("RCON_ENABLED", "false").strip().lower() in ("true", "1", "yes")
 _rcon_client: Optional["BERconClient"] = None
 _rcon_command_log: deque = deque(maxlen=200)
 
@@ -154,33 +170,124 @@ _rcon_command_log: deque = deque(maxlen=200)
 # Replay Recording
 # ═══════════════════════════════════════════════════════════
 
-_REPLAY_DIR = Path(os.path.dirname(__file__)) / "replays"
-_INVALID_SITREP_DUMP = Path(os.path.dirname(__file__)) / "last_invalid_game_master_body.bin"
+_REPLAY_DIR = _STATE_DIR / "replays"
+_RECORD_REPLAYS = os.getenv("GODMODE_RECORD_REPLAYS", "false").strip().lower() in ("true", "1", "yes")
+_REPLAY_FILE_LIMIT = 16
+_REPLAY_BYTES_PER_FILE = 8 * 1024 * 1024  # uncompressed
+_REPORT_FILE_LIMIT = 50
+_STATE_JSON_LIMIT = 1024 * 1024
+_SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,80}")
+
+
+def _valid_session_id(value: object) -> bool:
+    return isinstance(value, str) and _SESSION_ID_PATTERN.fullmatch(value) is not None
+
+
+def _state_files(directory: Path, suffix: str, session_id: str | None = None):
+    if session_id is not None and not _valid_session_id(session_id):
+        return
+    for path in directory.glob(f"{session_id or '*'}_*{suffix}"):
+        name, _, timestamp = path.name.removesuffix(suffix).rpartition("_")
+        if (session_id is None or name == session_id) and _valid_session_id(name) and (
+            timestamp.isascii() and timestamp.isdecimal() and not path.is_symlink() and path.is_file()
+        ):
+            yield path
+
+
+def _session_files(directory: Path, session_id: str, suffix: str):
+    return _state_files(directory, suffix, session_id)
+
+
+def _prune_state_files(directory: Path, suffix: str, keep: int, *, current: Path | None = None):
+    paths = sorted((p for p in _state_files(directory, suffix) if p != current),
+                   key=lambda p: (p.stat().st_mtime_ns, p.name), reverse=True)
+    for path in paths[keep:]:
+        path.unlink(missing_ok=True)
+
+
+def _write_state_json(path: Path, data: dict) -> bool:
+    encoded = json.dumps(data, default=str).encode("utf-8")
+    if len(encoded) > _STATE_JSON_LIMIT:
+        log.warning("Skipping oversized state snapshot")
+        return False
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".godmode-state-", delete=False) as fh:
+            temp_path = Path(fh.name)
+            fh.write(encoded)
+        temp_path.replace(path)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+    return True
+
+
+def _read_state_json(path: Path) -> dict:
+    with path.open("rb") as fh:
+        encoded = fh.read(_STATE_JSON_LIMIT + 1)
+    if len(encoded) > _STATE_JSON_LIMIT:
+        raise ValueError("State snapshot exceeds the size limit")
+    data = json.loads(encoded)
+    if not isinstance(data, dict):
+        raise ValueError("Expected a JSON object")
+    return data
+
+
+def _save_session_report(directory: Path, session_id: str, report: dict):
+    path = directory / f"{session_id}_{time.time_ns()}.json"
+    if _write_state_json(path, report):
+        _prune_state_files(directory, ".json", _REPORT_FILE_LIMIT - 1, current=path)
+        log.info("Saved session report: %s", path)
 
 
 class ReplayRecorder:
     def __init__(self):
         self._file = None
-        self._event_count = 0
+        self._session_id = None
+        self._bytes_written = 0
 
     def ensure_open(self, session_id: str):
+        if self._session_id != session_id:
+            self.close()
         if self._file is None:
-            _REPLAY_DIR.mkdir(parents=True, exist_ok=True)
-            path = _REPLAY_DIR / f"{session_id}_{int(time.time())}.jsonl.gz"
-            self._file = gzip.open(path, "at", encoding="utf-8")
+            _REPLAY_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _prune_state_files(_REPLAY_DIR, ".jsonl.gz", _REPLAY_FILE_LIMIT - 1)
+            # Create recordings privately, including when run outside Compose.
+            path = _REPLAY_DIR / f"{session_id}_{time.time_ns()}.jsonl.gz"
+            os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            self._file = gzip.open(path, "ab")
+            self._session_id = session_id
+            self._bytes_written = 0
             log.info("Replay recording to: %s", path)
 
     def record(self, event_type: str, data: dict, session_id: str = "default"):
-        self.ensure_open(session_id)
-        entry = {"type": event_type, "ts": time.time(), "data": data}
-        self._file.write(json.dumps(entry, default=str) + "\n")
-        self._file.flush()
-        self._event_count += 1
+        if not _RECORD_REPLAYS:
+            return
+        try:
+            entry = (json.dumps({"type": event_type, "ts": time.time(), "data": data}, default=str) + "\n").encode()
+            if len(entry) > _REPLAY_BYTES_PER_FILE:
+                return
+            if self._bytes_written + len(entry) > _REPLAY_BYTES_PER_FILE:
+                self.close()
+            self.ensure_open(session_id)
+            self._file.write(entry)
+            self._file.flush()
+            self._bytes_written += len(entry)
+        except (OSError, ValueError, RecursionError) as exc:
+            # Replays are optional. A full or unavailable state volume must
+            # not stop authenticated game requests from receiving a response.
+            log.warning("Replay write skipped (%s)", type(exc).__name__)
+            self.close()
 
     def close(self):
         if self._file:
-            self._file.close()
-            self._file = None
+            recording, self._file = self._file, None
+            try:
+                recording.close()
+            except OSError as exc:
+                log.warning("Could not close replay (%s)", type(exc).__name__)
+        self._bytes_written = 0
 
 
 _replay = ReplayRecorder()
@@ -365,13 +472,13 @@ async def _invoke_llm_with_retry(llm, messages, *, caller_label: str = "llm"):
                 pass
 
             if not is_retryable:
-                log.error("[%s] Non-retryable error on attempt %d: %s: %s",
-                          caller_label, attempt, err_type, e)
+                log.error("[%s] Non-retryable error on attempt %d: %s",
+                          caller_label, attempt, _provider_error_label(e))
                 raise
 
             if attempt >= LLM_MAX_RETRIES:
-                log.error("[%s] All %d attempts exhausted. Last error: %s: %s",
-                          caller_label, LLM_MAX_RETRIES, err_type, e)
+                log.error("[%s] All %d attempts exhausted. Last error: %s",
+                          caller_label, LLM_MAX_RETRIES, _provider_error_label(e))
                 raise
 
             # Exponential backoff: base * 2^(attempt-1), capped, with jitter
@@ -392,6 +499,13 @@ async def _invoke_llm_with_retry(llm, messages, *, caller_label: str = "llm"):
             await asyncio.sleep(delay)
 
     raise last_exc
+
+
+def _provider_error_label(exc: Exception) -> str:
+    """Provider error bodies may echo credentials or submitted game data."""
+    status = getattr(exc, "status_code", None)
+    label = type(exc).__name__
+    return f"{label} (HTTP {status})" if type(status) is int and 100 <= status <= 599 else label
 
 
 # ═══════════════════════════════════════════════════════════
@@ -652,7 +766,7 @@ class GameSitrep(BaseModel):
     players: list[SitrepPlayer] = Field(default_factory=list)
     contacts: list[SitrepContact] = Field(default_factory=list)
     spawn_anchors: list[SitrepSpawnAnchor] = Field(default_factory=list)
-    recent_events: list = Field(default_factory=list)
+    recent_events: list[str | dict] = Field(default_factory=list)
 
     model_config = {"extra": "allow"}  # Allow unknown fields for forward compat
 
@@ -661,7 +775,7 @@ class GameSitrep(BaseModel):
     def validate_weather(cls, v: str) -> str:
         valid = {"Clear", "Cloudy", "Overcast", "Rainy", "Storm", "Foggy"}
         if v and v not in valid:
-            log.warning("Unknown weather value: %s, defaulting to Clear", v)
+            log.warning("Unknown weather value, defaulting to Clear")
             return "Clear"
         return v
 
@@ -983,7 +1097,7 @@ class TacticalAnalyzer:
                 self.player_terrain[pid] = closest_terrain
 
         for event in game_state.get("recent_events", []):
-            if "shots_fired" in event or "player_hit" in event:
+            if isinstance(event, str) and ("shots_fired" in event or "player_hit" in event):
                 parts = event.split(":")
                 for part in parts:
                     if part.startswith("player_"):
@@ -2187,10 +2301,17 @@ class BattlePlan:
 _battle_plans: dict[str, BattlePlan] = {}
 
 
+def _remember_recent(cache: dict, key: str, item, limit: int):
+    cache.pop(key, None)
+    cache[key] = item
+    while len(cache) > limit:
+        del cache[next(iter(cache))]
+    return item
+
+
 def _get_battle_plan(sid: str) -> BattlePlan:
-    if sid not in _battle_plans:
-        _battle_plans[sid] = BattlePlan()
-    return _battle_plans[sid]
+    plan = _battle_plans.get(sid)
+    return _remember_recent(_battle_plans, sid, plan if plan is not None else BattlePlan(), MAX_BATTLE_PLANS)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -2469,16 +2590,16 @@ _operation_managers: dict[str, OperationManager] = {}
 
 
 def _get_operation_manager(sid: str) -> OperationManager:
-    if sid not in _operation_managers:
-        _operation_managers[sid] = OperationManager()
-    return _operation_managers[sid]
+    operation = _operation_managers.get(sid)
+    return _remember_recent(_operation_managers, sid, operation if operation is not None else OperationManager(),
+                            MAX_BATTLE_PLANS)
 
 
 # ═══════════════════════════════════════════════════════════
 # Persistent Campaign State
 # ═══════════════════════════════════════════════════════════
 
-_CAMPAIGN_STATE_PATH = os.path.join(os.path.dirname(__file__), "campaign_state.json")
+_CAMPAIGN_STATE_PATH = _STATE_DIR / "campaign_state.json"
 _CAMPAIGN_AUTOSAVE_INTERVAL = 300  # seconds (5 minutes)
 
 
@@ -2535,13 +2656,9 @@ class CampaignState:
     def save(self):
         """Write current campaign state to disk."""
         try:
-            data = self._to_dict()
-            tmp_path = _CAMPAIGN_STATE_PATH + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, default=str)
-            os.replace(tmp_path, _CAMPAIGN_STATE_PATH)
-            log.info("Campaign state saved (%d sessions, momentum=%.2f)",
-                     self.session_count, self.war_momentum)
+            if _write_state_json(_CAMPAIGN_STATE_PATH, self._to_dict()):
+                log.info("Campaign state saved (%d sessions, momentum=%.2f)",
+                         self.session_count, self.war_momentum)
         except Exception as e:
             log.warning("Failed to save campaign state: %s", e)
 
@@ -2551,8 +2668,7 @@ class CampaignState:
             log.info("No campaign state file found — starting fresh campaign")
             return
         try:
-            with open(_CAMPAIGN_STATE_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = _read_state_json(_CAMPAIGN_STATE_PATH)
             self.campaign_id = data.get("campaign_id", self.campaign_id)
             self.campaign_name = data.get("campaign_name", self.campaign_name)
             self.session_count = data.get("session_count", 0)
@@ -2626,24 +2742,33 @@ class CampaignState:
         self._previous_player_kills = _tactical_analyzer.player_kills
         self._previous_ai_kills = _tactical_analyzer.ai_kills
 
-        # Deaths / losses from SITREP events
-        for evt in game_state.get("recent_events", []):
-            evt_type = evt.get("type", "")
+        # Enfusion sends colon-delimited strings. Retain support for structured
+        # events from other clients without assuming their fields are strings.
+        for event in game_state.get("recent_events", []):
+            evt = event if isinstance(event, dict) else {}
+            evt_type = event.partition(":")[0] if isinstance(event, str) else evt.get("type")
             if evt_type == "player_killed":
                 self.total_player_deaths += 1
             elif evt_type in ("ai_killed", "unit_destroyed"):
                 self.total_ai_losses += 1
-
-        # ── Faction control from objectives / captures ──
-        for evt in game_state.get("recent_events", []):
-            if evt.get("type") in ("objective_completed", "location_captured"):
+            elif evt_type in ("objective_completed", "location_captured"):
                 loc = evt.get("location") or evt.get("name", "")
                 faction = evt.get("faction", evt.get("captured_by", ""))
-                if loc and faction:
-                    self.faction_control[loc] = faction
+                if isinstance(loc, str) and loc and isinstance(faction, str) and faction:
+                    loc, faction = loc[:128], faction[:32]
+                    _remember_recent(self.faction_control, loc, faction, 256)
                     self.notable_events.append(
                         f"Session #{self.session_count}: {loc} captured by {faction}"
                     )
+                if evt_type == "objective_completed" and evt:
+                    name, outcome = evt.get("name"), evt.get("outcome")
+                    self.operations_completed.append({
+                        "name": name[:128] if isinstance(name, str) else "Unknown operation",
+                        "outcome": outcome[:128] if isinstance(outcome, str) else "completed",
+                        "timestamp": time.time(),
+                    })
+        del self.notable_events[:-100]
+        del self.operations_completed[:-50]
 
         # ── Player position ──
         players = game_state.get("players", [])
@@ -2664,15 +2789,6 @@ class CampaignState:
             self.current_difficulty_tier = str(tier_val)
         else:
             self.current_difficulty_tier = "balanced"
-
-        # ── Operations (from objectives) ──
-        for evt in game_state.get("recent_events", []):
-            if evt.get("type") == "objective_completed":
-                self.operations_completed.append({
-                    "name": evt.get("name", "Unknown operation"),
-                    "outcome": evt.get("outcome", "completed"),
-                    "timestamp": time.time(),
-                })
 
         # ── Player count tracking for disconnect detection ──
         player_count = game_state.get("player_count", len(players))
@@ -2853,6 +2969,8 @@ _compacted_summaries: dict[str, str] = {}
 async def _maybe_compact_memory(session_id: str):
     """If history exceeds threshold, use LLM to compress old messages
     into a strategic briefing and replace them."""
+    if not _llm_enabled():
+        return
     history = get_session_history(session_id)
     msg_count = len(history.messages)
 
@@ -2914,7 +3032,7 @@ async def _maybe_compact_memory(session_id: str):
                 stats["compaction_runs"] = stats.get("compaction_runs", 0) + 1
 
     except Exception as e:
-        log.warning("Auto-compaction failed: %s: %s", session_id, e)
+        log.warning("Auto-compaction failed: %s: %s", session_id, _provider_error_label(e))
         _trim_history(history)
 
 
@@ -2922,8 +3040,8 @@ async def _maybe_compact_memory(session_id: str):
 # Cross-Session Learning
 # ═══════════════════════════════════════════════════════════
 
-_BATTLE_HISTORY_DIR = os.path.join(os.path.dirname(__file__), "battle_history")
-_BATTLE_SUMMARIES_DIR = Path(os.path.dirname(__file__)) / "battle_summaries"
+_BATTLE_HISTORY_DIR = _STATE_DIR / "battle_history"
+_BATTLE_SUMMARIES_DIR = _STATE_DIR / "battle_summaries"
 _MAX_PAST_SESSIONS = 5
 
 
@@ -2938,7 +3056,7 @@ _last_known_player_count: int = 0  # track player count transitions
 def _get_session_stats(session_id: str) -> dict:
     """Get or create cumulative stats tracker for a session."""
     if session_id not in _session_stats:
-        _session_stats[session_id] = {
+        session = {
             "session_id": session_id,
             "start_time": time.time(),
             "end_time": None,
@@ -2955,7 +3073,9 @@ def _get_session_stats(session_id: str) -> dict:
             "peak_enemy_count": 0,
             "total_sitreps": 0,
         }
-    return _session_stats[session_id]
+    else:
+        session = _session_stats[session_id]
+    return _remember_recent(_session_stats, session_id, session, MAX_SESSIONS)
 
 
 def _update_session_stats_from_sitrep(session_id: str, game_state: dict):
@@ -3012,7 +3132,6 @@ def _update_session_stats_from_commands(session_id: str, commands: dict):
 
 def _save_battle_summary(session_id: str, summary: str, battle_plan: "BattlePlan"):
     """Persist a battle summary to disk for cross-session learning."""
-    os.makedirs(_BATTLE_HISTORY_DIR, exist_ok=True)
     record = {
         "session_id": session_id,
         "timestamp": time.time(),
@@ -3022,11 +3141,8 @@ def _save_battle_summary(session_id: str, summary: str, battle_plan: "BattlePlan
         "lessons": battle_plan.lessons_learned,
         "tactic_performance": battle_plan.get_performance_summary(),
     }
-    filepath = os.path.join(_BATTLE_HISTORY_DIR, f"{session_id}_{int(time.time())}.json")
     try:
-        with open(filepath, "w") as f:
-            json.dump(record, f, indent=2, default=str)
-        log.info("Saved battle summary: %s", filepath)
+        _save_session_report(_BATTLE_HISTORY_DIR, session_id, record)
     except Exception as e:
         log.warning("Failed to save battle summary: %s", e)
 
@@ -3036,22 +3152,13 @@ def _load_past_battle_lessons() -> str:
     if not os.path.isdir(_BATTLE_HISTORY_DIR):
         return ""
 
-    files = []
-    for fname in os.listdir(_BATTLE_HISTORY_DIR):
-        if fname.endswith(".json"):
-            fpath = os.path.join(_BATTLE_HISTORY_DIR, fname)
-            files.append((os.path.getmtime(fpath), fpath))
-
-    if not files:
-        return ""
-
-    files.sort(reverse=True)
+    files = sorted(_state_files(_BATTLE_HISTORY_DIR, ".json"),
+                   key=lambda p: p.stat().st_mtime_ns, reverse=True)
     parts = ["=== LESSONS FROM PAST BATTLES ==="]
 
-    for _, fpath in files[:_MAX_PAST_SESSIONS]:
+    for fpath in files[:_MAX_PAST_SESSIONS]:
         try:
-            with open(fpath) as f:
-                record = json.load(f)
+            record = _read_state_json(fpath)
             perf = record.get("tactic_performance", {})
             lessons = record.get("lessons", [])
             best = perf.get("most_effective_tactic", "unknown")
@@ -3089,36 +3196,46 @@ def _collect_battle_data(session_id: str) -> dict:
     perf = bp.get_performance_summary() if bp else {}
     tactic_outcomes = perf.get("tactic_outcomes", {})
 
-    replay_events = []
+    key_events: deque[dict] = deque(maxlen=20)
+    replay_event_count = 0
     try:
-        _REPLAY_DIR.mkdir(parents=True, exist_ok=True)
         replay_files = sorted(
-            [f for f in _REPLAY_DIR.glob(f"{session_id}*.jsonl.gz")],
-            key=lambda p: p.stat().st_mtime, reverse=True,
+            _session_files(_REPLAY_DIR, session_id, ".jsonl.gz"),
+            key=lambda p: p.stat().st_mtime_ns, reverse=True,
         )
         if replay_files:
-            with gzip.open(replay_files[0], "rt", encoding="utf-8") as rf:
-                for line in rf:
+            with gzip.open(replay_files[0], "rb") as rf:
+                remaining = _REPLAY_BYTES_PER_FILE
+                while remaining > 0:
+                    line = rf.readline(remaining + 1)
+                    if not line or len(line) > remaining:
+                        break
+                    remaining -= len(line)
                     try:
-                        replay_events.append(json.loads(line.strip()))
-                    except Exception:
+                        evt = json.loads(line)
+                    except (ValueError, RecursionError):
                         continue
-    except Exception as e:
-        log.warning("Failed to read replay for summary: %s", e)
-
-    key_events = []
-    for evt in replay_events:
-        if evt.get("type") == "commands":
-            cmds = evt.get("data", {}).get("commands", [])
-            spawns = [c for c in cmds if "spawn" in c.get("command_type", "")]
-            attacks = [c for c in cmds if c.get("command_type") in (
-                "attack", "seek_and_destroy", "flank_left", "flank_right")]
-            if spawns:
-                key_events.append({"time": evt.get("ts", 0),
-                                   "event": f"Deployed {len(spawns)} units"})
-            if attacks:
-                key_events.append({"time": evt.get("ts", 0),
-                                   "event": f"Launched {len(attacks)} attack orders"})
+                    if not isinstance(evt, dict):
+                        continue
+                    replay_event_count += 1
+                    data = evt.get("data")
+                    if evt.get("type") != "commands" or not isinstance(data, dict):
+                        continue
+                    cmds = data.get("commands")
+                    if not isinstance(cmds, list):
+                        continue
+                    kinds = [cmd.get("command_type") for cmd in cmds if isinstance(cmd, dict)]
+                    spawns = sum(1 for kind in kinds if isinstance(kind, str) and "spawn" in kind)
+                    attacks = sum(1 for kind in kinds if kind in ("attack", "seek_and_destroy", "flank_left", "flank_right"))
+                    if spawns:
+                        key_events.append({"time": evt.get("ts", 0), "event": f"Deployed {spawns} units"})
+                    if attacks:
+                        key_events.append({"time": evt.get("ts", 0), "event": f"Launched {attacks} attack orders"})
+    except EOFError:
+        # An active gzip recording may not yet have a footer.
+        pass
+    except OSError as exc:
+        log.warning("Failed to read replay for summary (%s)", type(exc).__name__)
 
     return {
         "session_id": session_id,
@@ -3145,8 +3262,8 @@ def _collect_battle_data(session_id: str) -> dict:
         "avg_unit_survival_seconds": perf.get("avg_unit_survival_seconds", 0),
         "lessons_learned": bp.lessons_learned if bp else [],
         "total_sitreps": ss.get("total_sitreps", 0),
-        "key_events": key_events[-20:],
-        "replay_event_count": len(replay_events),
+        "key_events": list(key_events),
+        "replay_event_count": replay_event_count,
         "difficulty_final": round(ta.difficulty_modifier, 2),
     }
 
@@ -3162,6 +3279,24 @@ async def generate_battle_summary(session_id: str) -> dict:
     if battle_data["turns"] == 0 and battle_data["total_sitreps"] == 0:
         return {"session_id": session_id, "status": "no_data",
                 "message": "No battle data available for this session."}
+
+    if not _llm_enabled():
+        result = {
+            "session_id": session_id,
+            "generated_at": time.time(),
+            "report": (
+                f"AFTER-ACTION REPORT — {session_id}\n"
+                f"Duration: {battle_data['duration_formatted']}\n"
+                f"SITREPs: {battle_data['total_sitreps']}\n"
+                f"Peak players: {battle_data['max_player_count']}\n"
+                f"Commands issued: {battle_data['commands_issued']}\n"
+                "Local statistics only. LLM provider is disabled."
+            ),
+            "battle_data": battle_data,
+        }
+        _remember_recent(_generated_summaries, session_id, result, MAX_SESSIONS)
+        _save_after_action_report(session_id, result)
+        return result
 
     stats_text = (
         f"SESSION: {session_id}\n"
@@ -3227,7 +3362,7 @@ async def generate_battle_summary(session_id: str) -> dict:
         response = await _invoke_llm_with_retry(llm, messages, caller_label="battle_summary")
         report_text = response.content if hasattr(response, "content") else str(response)
     except Exception as e:
-        log.error("LLM call failed for battle summary: %s", e)
+        log.error("LLM call failed for battle summary: %s", _provider_error_label(e))
         report_text = (
             f"AFTER-ACTION REPORT -- SESSION {session_id}\n"
             f"{'=' * 50}\n\n"
@@ -3251,7 +3386,7 @@ async def generate_battle_summary(session_id: str) -> dict:
         "battle_data": battle_data,
     }
 
-    _generated_summaries[session_id] = result
+    _remember_recent(_generated_summaries, session_id, result, MAX_SESSIONS)
     _save_after_action_report(session_id, result)
 
     log.info("Generated after-action report for session %s (%d chars)",
@@ -3262,12 +3397,7 @@ async def generate_battle_summary(session_id: str) -> dict:
 def _save_after_action_report(session_id: str, report: dict):
     """Save an after-action report to the battle_summaries directory."""
     try:
-        _BATTLE_SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
-        filename = f"{session_id}_{int(time.time())}.json"
-        filepath = _BATTLE_SUMMARIES_DIR / filename
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2, default=str)
-        log.info("Saved after-action report: %s", filepath)
+        _save_session_report(_BATTLE_SUMMARIES_DIR, session_id, report)
     except Exception as e:
         log.warning("Failed to save after-action report: %s", e)
 
@@ -3466,6 +3596,8 @@ _llm = None
 
 def _get_llm():
     global _llm
+    if not _llm_enabled():
+        raise RuntimeError("LLM provider is disabled")
     if _llm is not None:
         return _llm
     primary = _build_chat_model(LLM_PROVIDER, MODEL_NAME, MAX_TOKENS)
@@ -3487,7 +3619,7 @@ _session_histories: dict[str, InMemoryChatMessageHistory] = {}
 _session_access_times: dict[str, float] = {}
 _active_session: str = "default"
 MAX_MEMORY_MESSAGES = int(os.getenv("MAX_MEMORY_MESSAGES", "20"))
-MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", "50"))
+MAX_SESSIONS = max(1, int(os.getenv("MAX_SESSIONS", "50")))
 
 
 def get_session_history(sid: str) -> InMemoryChatMessageHistory:
@@ -3583,7 +3715,7 @@ stats = {
 pending_manual_commands: list[dict] = []
 MAX_COMMAND_LOG = 200
 command_log: deque[dict] = deque(maxlen=MAX_COMMAND_LOG)
-MAX_BATTLE_PLANS = int(os.getenv("MAX_BATTLE_PLANS", "50"))
+MAX_BATTLE_PLANS = max(1, int(os.getenv("MAX_BATTLE_PLANS", "50")))
 MAX_PENDING_MANUAL = 20
 
 # Rate limiter for manual commands (token bucket)
@@ -3595,7 +3727,7 @@ _state_lock = asyncio.Lock()
 
 # ─── LLM concurrency gate & request deduplication ───
 # Limits concurrent LLM calls to avoid flooding the provider with 429s.
-_LLM_MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT_LLM", os.getenv("LLM_MAX_CONCURRENT", "10")))
+_LLM_MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT_LLM", os.getenv("LLM_MAX_CONCURRENT", "2")))
 _llm_semaphore: Optional[asyncio.Semaphore] = None  # lazily created (needs running loop)
 
 
@@ -3681,6 +3813,8 @@ async def call_llm(
     game_state: Optional[dict] = None,
 ) -> dict:
     global _consecutive_failures, _circuit_open_until
+    if not _llm_enabled():
+        return empty_response("llm_disabled")
 
     # ── Circuit breaker: skip LLM entirely if too many recent failures ──
     now = time.time()
@@ -3804,7 +3938,7 @@ async def _call_llm_inner(
             parser = JsonOutputParser(pydantic_object=CommandBatch)
             result = await parser.ainvoke(response)
         except Exception as parse_err:
-            log.warning("JsonOutputParser failed, attempting manual extraction: %s", parse_err)
+            log.warning("JsonOutputParser failed, attempting manual extraction: %s", type(parse_err).__name__)
             result = parse_llm_response(text)
 
         if not result or not result.get("commands"):
@@ -3837,7 +3971,7 @@ async def _call_llm_inner(
         return validated
 
     except Exception as e:
-        log.warning("Chain failed (type=%s), raw fallback: %s", type(e).__name__, e)
+        log.warning("Chain failed, trying fallback: %s", _provider_error_label(e))
         fallback_result = await _fallback_call(full_msg, history, game_state=game_state)
 
         if fallback_result.get("commands"):
@@ -4007,6 +4141,8 @@ def _format_tactical_intel(intel: dict) -> str:
 
 async def _fallback_call(user_message: str, history: InMemoryChatMessageHistory,
                          game_state: Optional[dict] = None) -> dict:
+    if not _llm_enabled():
+        return empty_response("llm_disabled")
     try:
         llm = _get_llm()
         messages = [SystemMessage(content=_SYSTEM_PROMPT_RAW)]
@@ -4030,14 +4166,13 @@ async def _fallback_call(user_message: str, history: InMemoryChatMessageHistory,
         # If fallback parse also yields 0 commands, use emergency fallback
         if not result.get("commands"):
             stats["empty_llm_responses"] = stats.get("empty_llm_responses", 0) + 1
-            log.warning("Fallback call returned 0 commands. Raw LLM text (%d chars): %.500s",
-                        len(text), text)
+            log.warning("Fallback call returned 0 commands (%d response chars)", len(text))
             return _emergency_fallback_response(game_state)
 
         return result
 
     except Exception as e:
-        log.error("Fallback LLM call also failed after retries: %s: %s", type(e).__name__, e)
+        log.error("Fallback LLM call also failed after retries: %s", _provider_error_label(e))
         return _emergency_fallback_response(game_state)
 
 
@@ -6871,8 +7006,7 @@ def parse_llm_response(text: str) -> dict:
     if extracted.get("commands"):
         return _validate_command_batch(extracted)
 
-    log.warning("All JSON parse strategies failed for response (%d chars): %.300s",
-                len(original_text), original_text)
+    log.warning("All JSON parse strategies failed for response (%d chars)", len(original_text))
     return empty_response()
 
 
@@ -6883,6 +7017,8 @@ def parse_llm_response(text: str) -> dict:
 
 async def _agent_llm_caller(system_prompt: str, user_message: str) -> dict:
     """Adapter function: lets agent orchestrator call the LLM via our existing infrastructure."""
+    if not _llm_enabled():
+        return empty_response("llm_disabled")
     llm = _get_llm()
     from langchain_core.messages import SystemMessage as _SysMsg, HumanMessage as _HumMsg
     messages = [_SysMsg(content=system_prompt), _HumMsg(content=user_message)]
@@ -6926,15 +7062,16 @@ async def _agent_llm_caller(system_prompt: str, user_message: str) -> dict:
 
         return {"commands": [], "narrative_broadcast": ""}
     except Exception as e:
-        log.warning("Agent LLM call failed: %s", e)
+        log.warning("Agent LLM call failed: %s", _provider_error_label(e))
         return {"commands": [], "narrative_broadcast": ""}
 
 
 # Global agent orchestrator (initialized at startup)
 _agent_orchestrator: Optional[AgentOrchestrator] = None
-AGENTS_ENABLED = os.getenv("AGENTS_ENABLED", "true").lower() in ("true", "1", "yes")
+AGENTS_ENABLED = _llm_enabled() and os.getenv("AGENTS_ENABLED", "false").lower() in ("true", "1", "yes")
 
 
+@asynccontextmanager
 async def lifespan(app: FastAPI):
     global _agent_orchestrator, _rcon_client, _campaign_autosave_task
     # ─── Campaign State Initialization ───
@@ -6945,12 +7082,6 @@ async def lifespan(app: FastAPI):
     log.info("Provider: %s | Model: %s", LLM_PROVIDER, MODEL_NAME)
     if FALLBACK_PROVIDER:
         log.info("Fallback: %s / %s", FALLBACK_PROVIDER, FALLBACK_MODEL)
-    if LLM_PROVIDER == "glm":
-        log.info("GLM: %s", GLM_BASE_URL)
-    if LLM_PROVIDER == "openrouter":
-        log.info("OpenRouter: %s", OPENROUTER_BASE_URL)
-    if LLM_PROVIDER == "ollama":
-        log.info("Ollama: %s", OLLAMA_BASE_URL)
     log.info("Tokens: %d | History: %d | Memory: %d | Compact@: %d",
              MAX_TOKENS, MAX_HISTORY, MAX_MEMORY_MESSAGES, COMPACTION_THRESHOLD)
     log.info("Retry: max=%d base=%.1fs cap=%.0fs jitter=%.0f%% | Rate: %d RPM | Max-concurrent: %d",
@@ -6960,13 +7091,12 @@ async def lifespan(app: FastAPI):
     if AGENTS_ENABLED:
         _agent_orchestrator = await create_orchestrator(llm_caller=_agent_llm_caller)
         log.info("Multi-agent system: ENABLED (10 agents)")
-    else:
+    elif _llm_enabled():
         log.info("Multi-agent system: DISABLED (single-LLM mode)")
+    else:
+        log.info("LLM and multi-agent system disabled")
     log.info("Features: compaction, tactical-intel, battle-plan, adaptive-difficulty, adaptive-pacing, multi-agent, persistent-campaign, multi-phase-ops")
     log.info("=" * 56)
-    if _HAS_SERVER_INTEGRATION:
-        await init_services()
-        log.info("Server integration services initialized")
     # ─── RCON Client Initialization ───
     if _HAS_RCON and _RCON_ENABLED:
         _rcon_client = create_rcon_client()
@@ -6986,26 +7116,31 @@ async def lifespan(app: FastAPI):
         log.info("RCON: rcon_client module not available — command execution disabled")
     else:
         log.info("RCON: disabled by configuration (RCON_ENABLED=false)")
-    yield
-    # ─── RCON Client Teardown ───
-    if _rcon_client is not None:
-        await _rcon_client.disconnect()
-        log.info("RCON: disconnected")
     if _HAS_SERVER_INTEGRATION:
-        await shutdown_services()
-    # Save battle summaries on shutdown for cross-session learning
-    for sid, bp in _battle_plans.items():
-        if bp.turn_count > 0:
-            summary = _compacted_summaries.get(sid, "")
-            if not summary:
-                summary = bp.to_briefing()
-            _save_battle_summary(sid, summary, bp)
-    # ─── Campaign State Teardown ───
-    if _campaign_autosave_task and not _campaign_autosave_task.done():
-        _campaign_autosave_task.cancel()
-    last_gs = game_history[-1]["state"] if game_history else None
-    _campaign_state.end_session(last_gs)
-    log.info("Shutting down")
+        await init_services(server_control_enabled=_SERVER_CONTROL_ENABLED, rcon_client=_rcon_client)
+    try:
+        yield
+    finally:
+        if _HAS_SERVER_INTEGRATION:
+            await shutdown_services()
+        if _rcon_client is not None:
+            await _rcon_client.disconnect()
+            _rcon_client = None
+            log.info("RCON: disconnected")
+        _agent_orchestrator = None
+        for task in (_background_llm_task, _campaign_autosave_task):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        # Save battle summaries on shutdown for cross-session learning.
+        for sid, bp in _battle_plans.items():
+            if bp.turn_count > 0:
+                summary = _compacted_summaries.get(sid, "") or bp.to_briefing()
+                _save_battle_summary(sid, summary, bp)
+        _replay.close()
+        last_gs = game_history[-1]["state"] if game_history else None
+        _campaign_state.end_session(last_gs)
+        log.info("Shutting down")
 
 
 app = FastAPI(
@@ -7014,24 +7149,47 @@ app = FastAPI(
     description="LLM middleware with auto-compaction, tactical intelligence, "
                 "battle plan persistence, adaptive difficulty, chain-of-thought.",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+    redirect_slashes=False,
 )
 
-_cors_origins = os.getenv("CORS_ORIGINS", "*").split(",")
+
+def _explicit_cors_origins(value: str) -> list[str]:
+    origins = []
+    for origin in (item.strip() for item in value.split(",")):
+        if not origin:
+            continue
+        try:
+            parsed = urlsplit(origin)
+            if (parsed.scheme in ("http", "https") and parsed.hostname
+                    and "*" not in origin and parsed.username is None
+                    and origin == f"{parsed.scheme}://{parsed.netloc}"):
+                _ = parsed.port
+                origins.append(origin)
+                continue
+        except ValueError:
+            pass
+        log.warning("Ignoring invalid CORS origin; use exact HTTP(S) origins")
+    return origins
+
+
+# Authentication runs before rate limiting; explicit CORS preflight (if enabled)
+# is transport negotiation only. The corresponding request still needs its key.
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
-    CORSMiddleware, allow_origins=_cors_origins, allow_methods=["*"], allow_headers=["*"],
+    APIKeyMiddleware,
+    api_key=os.getenv("GODMODE_API_KEY", ""),
+    game_api_key=os.getenv("GODMODE_GAME_API_KEY", ""),
 )
-
-# Security middleware
-try:
-    from auth import APIKeyMiddleware, RateLimitMiddleware, SecurityHeadersMiddleware
-    _api_key = os.getenv("GODMODE_API_KEY", "")
-    if _api_key:
-        app.add_middleware(APIKeyMiddleware, api_key=_api_key)
-        log.info("API key authentication enabled")
-    app.add_middleware(RateLimitMiddleware, max_per_second=5)
-    app.add_middleware(SecurityHeadersMiddleware)
-except ImportError:
-    log.warning("auth module not available, security middleware disabled")
+_cors_origins = _explicit_cors_origins(os.getenv("CORS_ORIGINS", ""))
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware, allow_origins=_cors_origins,
+        allow_methods=["GET", "HEAD", "POST"], allow_headers=["X-API-Key", "Content-Type"],
+    )
+app.add_middleware(SecurityHeadersMiddleware)
 
 if _HAS_SERVER_INTEGRATION:
     app.include_router(server_router)
@@ -7115,6 +7273,8 @@ def _dechunk_body(raw: bytes) -> bytes:
         except (ValueError, IndexError):
             out.extend(raw[i:])
             break
+        if chunk_size < 0:
+            raise ValueError("Negative chunk size")
         if chunk_size == 0:
             break
         chunk_start = nl + 2
@@ -7122,6 +7282,13 @@ def _dechunk_body(raw: bytes) -> bytes:
         out.extend(raw[chunk_start:min(chunk_end, len(raw))])
         i = chunk_end + 2  # skip trailing \r\n after chunk data
     return bytes(out)
+
+
+def _finite_json_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("Non-finite JSON number")
+    return number
 
 
 def _parse_game_master_body(raw_body: bytes) -> dict:
@@ -7144,14 +7311,17 @@ def _parse_game_master_body(raw_body: bytes) -> dict:
     if not text:
         raise ValueError("Request body empty after normalization")
 
+    def decode(value: str):
+        return json.loads(value, parse_float=_finite_json_float, parse_constant=_finite_json_float)
+
     try:
-        parsed = json.loads(text)
+        parsed = decode(text)
     except Exception:
         first_obj = text.find("{")
         last_obj = text.rfind("}")
         if first_obj != -1 and last_obj != -1 and last_obj > first_obj:
             text = text[first_obj:last_obj + 1]
-        parsed = json.loads(text)
+        parsed = decode(text)
 
     if isinstance(parsed, str):
         nested = parsed.lstrip("\ufeff").replace("\x00", "")
@@ -7159,13 +7329,13 @@ def _parse_game_master_body(raw_body: bytes) -> dict:
         if not nested:
             raise ValueError("Nested JSON string was empty")
         try:
-            parsed = json.loads(nested)
+            parsed = decode(nested)
         except Exception:
             first_obj = nested.find("{")
             last_obj = nested.rfind("}")
             if first_obj != -1 and last_obj != -1 and last_obj > first_obj:
                 nested = nested[first_obj:last_obj + 1]
-            parsed = json.loads(nested)
+            parsed = decode(nested)
 
     if not isinstance(parsed, dict):
         raise ValueError(f"Expected JSON object body, got {type(parsed).__name__}")
@@ -7179,10 +7349,14 @@ def _parse_game_master_body(raw_body: bytes) -> dict:
 
 @app.get("/dashboard")
 async def dashboard():
-    html_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
-    if not os.path.isfile(html_path):
-        raise HTTPException(status_code=404, detail="dashboard.html not found")
-    return FileResponse(html_path, media_type="text/html")
+    nonce = secrets.token_urlsafe(24)
+    html = (_SOURCE_DIR / "dashboard.html").read_text(encoding="utf-8")
+    policy = (
+        f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; "
+        "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    )
+    return HTMLResponse(html.replace('nonce="GODMODE_CSP_NONCE"', f'nonce="{nonce}"'),
+                        headers={"Content-Security-Policy": policy})
 
 
 # Background task: runs the LLM pipeline and caches results for the next SITREP.
@@ -7225,7 +7399,8 @@ def _is_rcon_command_allowed(command: str) -> bool:
     ``_RCON_ALLOWED_PREFIXES``.  The special ``#shutdown`` command is only
     allowed when ``RCON_ALLOW_SHUTDOWN=true`` is set in the environment.
     """
-    if not command or not command.strip():
+    if (not command.strip() or len(command) > 1024
+            or any(ord(char) < 32 or ord(char) == 127 for char in command)):
         return False
     first_token = command.strip().split()[0].lower()
     # Check against allowed prefixes (case-insensitive)
@@ -7233,97 +7408,6 @@ def _is_rcon_command_allowed(command: str) -> bool:
         if first_token == prefix.lower():
             return True
     return False
-
-
-async def execute_rcon_commands(commands: dict, game_state: dict) -> list[dict]:
-    """Extract and execute RCON-eligible commands from an LLM response.
-
-    Scans the ``commands`` dict for entries containing an ``"rcon_command"``
-    field and sends each allowed command to the game server via the RCON
-    client.
-
-    Args:
-        commands: The full LLM command response dict (with a ``"commands"``
-            list and optional top-level ``"rcon_command"``).
-        game_state: Current game state dict (used for context logging).
-
-    Returns:
-        A list of result dicts, each with ``"command"``, ``"status"``,
-        ``"response"``, and ``"timestamp"`` fields.
-    """
-    if _rcon_client is None or not _rcon_client.is_connected:
-        log.debug("RCON: skipping command execution — client not connected")
-        return []
-
-    rcon_commands_to_send: list[str] = []
-
-    # 1. Top-level rcon_command field
-    top_level = commands.get("rcon_command")
-    if top_level and isinstance(top_level, str):
-        rcon_commands_to_send.append(top_level.strip())
-
-    # 2. Per-command rcon_command fields
-    for cmd in commands.get("commands", []):
-        rcon_cmd = cmd.get("rcon_command")
-        if rcon_cmd and isinstance(rcon_cmd, str):
-            rcon_commands_to_send.append(rcon_cmd.strip())
-
-    if not rcon_commands_to_send:
-        return []
-
-    results = []
-    mission_time = game_state.get("mission_time_seconds", 0) if game_state else 0
-    player_count = game_state.get("player_count", 0) if game_state else 0
-
-    for rcon_cmd in rcon_commands_to_send:
-        entry = {
-            "command": rcon_cmd,
-            "timestamp": time.time(),
-            "mission_time": mission_time,
-            "player_count": player_count,
-            "source": "llm",
-        }
-
-        if not _is_rcon_command_allowed(rcon_cmd):
-            entry["status"] = "blocked"
-            entry["response"] = f"Command not in whitelist: {rcon_cmd.split()[0]}"
-            log.warning("RCON: BLOCKED disallowed command from LLM: %s", rcon_cmd)
-            results.append(entry)
-            _rcon_command_log.append(entry)
-            continue
-
-        try:
-            log.info("RCON: executing command: %s", rcon_cmd)
-            response = await _rcon_client.send_command(rcon_cmd)
-            entry["status"] = "ok"
-            entry["response"] = response
-            log.info("RCON: command OK [%s] -> %s", rcon_cmd,
-                     response[:200] if response else "(empty)")
-        except ConnectionError as exc:
-            entry["status"] = "error"
-            entry["response"] = f"Connection error: {exc}"
-            log.error("RCON: connection error executing [%s]: %s", rcon_cmd, exc)
-        except asyncio.TimeoutError:
-            entry["status"] = "timeout"
-            entry["response"] = "Command timed out"
-            log.error("RCON: timeout executing [%s]", rcon_cmd)
-        except Exception as exc:
-            entry["status"] = "error"
-            entry["response"] = f"Unexpected error: {exc}"
-            log.error("RCON: unexpected error executing [%s]: %s", rcon_cmd, exc)
-
-        results.append(entry)
-        _rcon_command_log.append(entry)
-
-    async with _state_lock:
-        stats["rcon_commands_sent"] = stats.get("rcon_commands_sent", 0) + len(
-            [r for r in results if r["status"] == "ok"]
-        )
-        stats["rcon_commands_blocked"] = stats.get("rcon_commands_blocked", 0) + len(
-            [r for r in results if r["status"] == "blocked"]
-        )
-
-    return results
 
 
 async def _execute_single_rcon_command(command: str, source: str = "manual") -> dict:
@@ -7343,7 +7427,7 @@ async def _execute_single_rcon_command(command: str, source: str = "manual") -> 
         "source": source,
     }
 
-    if _rcon_client is None or not _rcon_client.is_connected:
+    if not _RCON_ENABLED or _rcon_client is None or not _rcon_client.is_connected:
         entry["status"] = "error"
         entry["response"] = "RCON client not connected"
         _rcon_command_log.append(entry)
@@ -7351,30 +7435,30 @@ async def _execute_single_rcon_command(command: str, source: str = "manual") -> 
 
     if not _is_rcon_command_allowed(command):
         entry["status"] = "blocked"
-        entry["response"] = f"Command not in whitelist: {command.split()[0]}"
-        log.warning("RCON: BLOCKED disallowed manual command: %s", command)
+        entry["response"] = "Command not allowed"
+        log.warning("RCON: blocked disallowed manual command")
+        stats["rcon_commands_blocked"] = stats.get("rcon_commands_blocked", 0) + 1
         _rcon_command_log.append(entry)
         return entry
 
     try:
-        log.info("RCON [%s]: executing command: %s", source, command)
         response = await _rcon_client.send_command(command)
         entry["status"] = "ok"
         entry["response"] = response
-        log.info("RCON [%s]: command OK [%s] -> %s", source, command,
-                 response[:200] if response else "(empty)")
+        stats["rcon_commands_sent"] = stats.get("rcon_commands_sent", 0) + 1
+        log.info("RCON [%s]: command sent", source)
     except ConnectionError as exc:
         entry["status"] = "error"
         entry["response"] = f"Connection error: {exc}"
-        log.error("RCON [%s]: connection error [%s]: %s", source, command, exc)
+        log.error("RCON [%s]: connection error: %s", source, exc)
     except asyncio.TimeoutError:
         entry["status"] = "timeout"
         entry["response"] = "Command timed out"
-        log.error("RCON [%s]: timeout [%s]", source, command)
+        log.error("RCON [%s]: timeout", source)
     except Exception as exc:
         entry["status"] = "error"
         entry["response"] = f"Unexpected error: {exc}"
-        log.error("RCON [%s]: unexpected error [%s]: %s", source, command, exc)
+        log.error("RCON [%s]: unexpected error: %s", source, exc)
 
     _rcon_command_log.append(entry)
     return entry
@@ -7390,6 +7474,8 @@ async def _process_sitrep_background(
     mission_time: float,
 ):
     """Heavy LLM processing in background. Caches results for next SITREP."""
+    if not _llm_enabled():
+        return
     try:
         # ── Skip LLM when no players (save tokens) ──
         if player_count == 0:
@@ -7633,20 +7719,6 @@ async def _process_sitrep_background(
         # ID prediction matches the game's sequential assignment).
         commands = _inject_spawn_followup_orders(commands, game_state)
 
-        # ── RCON Command Execution ─────────────────────────────
-        # If any commands carry an "rcon_command" field, send them to the
-        # game server via the RCON client.
-        try:
-            rcon_results = await execute_rcon_commands(commands, game_state)
-            if rcon_results:
-                log.info("RCON: executed %d commands (%d ok, %d blocked, %d errors)",
-                         len(rcon_results),
-                         sum(1 for r in rcon_results if r["status"] == "ok"),
-                         sum(1 for r in rcon_results if r["status"] == "blocked"),
-                         sum(1 for r in rcon_results if r["status"] in ("error", "timeout")))
-        except Exception as exc:
-            log.error("RCON: batch execution failed: %s", exc)
-
         _replay.record("commands", commands, session_id=session_id)
         _metrics.record_response(_llm_response_time_ms)
 
@@ -7692,7 +7764,7 @@ async def _process_sitrep_background(
     except Exception as e:
         async with _state_lock:
             stats["total_errors"] += 1
-        log.error("Background SITREP error: %s: %s", type(e).__name__, e)
+        log.error("Background SITREP error: %s", _provider_error_label(e))
 
 
 @app.post("/api/game-master")
@@ -7702,38 +7774,36 @@ async def game_master(request: Request):
     async with _state_lock:
         stats["total_requests"] += 1
 
-    raw_body = b""
+    raw_body = bytearray()
+    async for chunk in request.stream():
+        if len(raw_body) + len(chunk) > 1024 * 1024:
+            raise HTTPException(status_code=413, detail="SITREP exceeds 1 MiB")
+        raw_body.extend(chunk)
     try:
-        raw_body = await request.body()
         game_state = _parse_game_master_body(raw_body)
-    except Exception as e:
-        try:
-            _INVALID_SITREP_DUMP.write_bytes(raw_body)
-        except Exception as dump_error:
-            log.warning("Failed to write invalid SITREP dump: %s", dump_error)
-        body_preview = raw_body[:400].decode("utf-8", errors="replace") if raw_body else ""
-        log.warning("Invalid game-master JSON body: %s | preview=%r", e, body_preview)
+        aliases = {
+            "mission_time": "mission_time_seconds",
+            "weather": "current_weather",
+            "events": "recent_events",
+        }
+        for old_key, new_key in aliases.items():
+            if old_key in game_state and new_key not in game_state:
+                game_state[new_key] = game_state.pop(old_key)
+        validated = GameSitrep(**game_state)
+        game_state = validated.model_dump(exclude_none=True)
+        session_id = validated.mission_id or _active_session
+        if not _valid_session_id(session_id):
+            raise ValueError("Invalid session identifier")
+        command_results = SitrepCommandResults(
+            command_results=game_state.pop("command_results", []),
+        ).model_dump()["command_results"]
+    except (ValueError, TypeError, RecursionError):
+        log.warning("Discarded an invalid game-master SITREP")
         async with _state_lock:
             stats["total_errors"] += 1
             stats["parse_failures"] = stats.get("parse_failures", 0) + 1
-        return _sanitize_response(empty_response("invalid_game_master_json"))
-
-    # Normalize legacy field names from game SITREP before validation
-    _SITREP_FIELD_ALIASES = {
-        "mission_time": "mission_time_seconds",
-        "weather": "current_weather",
-        "events": "recent_events",
-    }
-    for old_key, new_key in _SITREP_FIELD_ALIASES.items():
-        if old_key in game_state and new_key not in game_state:
-            game_state[new_key] = game_state.pop(old_key)
-
-    # Validate and sanitize incoming SITREP
-    try:
-        validated = GameSitrep(**game_state)
-        game_state.update(validated.model_dump(exclude_none=True))
-    except Exception as e:
-        log.warning("SITREP validation warning: %s", e)
+        # Preserve the game client's expected empty command batch shape.
+        return _sanitize_response(empty_response())
 
     # Warn when players are reported but none have valid positions
     _sitrep_players = game_state.get("players", [])
@@ -7752,7 +7822,6 @@ async def game_master(request: Request):
     async with _state_lock:
         game_history.append({"timestamp": time.time(), "state": game_state})
 
-    command_results = game_state.pop("command_results", [])
     player_count = game_state.get("player_count", 0)
     mission_time = game_state.get("mission_time_seconds", 0)
 
@@ -7764,10 +7833,7 @@ async def game_master(request: Request):
     tactical_intel["adaptive_pacing"] = _adaptive_pacing.get_pacing_context()
     tactical_intel["campaign_briefing"] = _campaign_state.get_campaign_briefing()
 
-    session_id_for_replay = game_state.get("mission_id", _active_session)
-    _replay.record("sitrep", game_state, session_id=session_id_for_replay)
-
-    session_id = game_state.get("mission_id", _active_session)
+    _replay.record("sitrep", game_state, session_id=session_id)
 
     # ── Update cumulative session stats ──
     _update_session_stats_from_sitrep(session_id, game_state)
@@ -7790,6 +7856,12 @@ async def game_master(request: Request):
 
     if command_results:
         game_state["_command_results_summary"] = command_results[:10]
+
+    if not _llm_enabled():
+        _campaign_state.update_from_sitrep(game_state)
+        # The bundled game client receives operator commands in its SITREP
+        # reply. Other game clients can use the dedicated polling endpoint.
+        return _game_command_batch(await _take_pending_commands())
 
     compact_sitrep = _build_compact_sitrep(game_state)
 
@@ -7865,7 +7937,12 @@ async def game_master(request: Request):
     return _sanitize_response(empty_response())
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
+async def liveness():
+    return {"status": "ok"}
+
+
+@app.get("/api/health")
 async def health():
     up = time.time() - stats["start_time"]
     mem_msgs = sum(len(h.messages) for h in _session_histories.values())
@@ -7883,6 +7960,7 @@ async def health():
         "inflight_calls": len(_inflight_calls),
         "llm_max_concurrent": _LLM_MAX_CONCURRENT,
         "agents_enabled": AGENTS_ENABLED,
+        "replay_recording": _RECORD_REPLAYS,
         "agents": _agent_orchestrator.get_agent_status() if _agent_orchestrator else None,
         "adaptive_pacing": _adaptive_pacing.get_status(),
         "campaign": {
@@ -7896,15 +7974,6 @@ async def health():
         "operation": _operation_managers[_active_session].to_dict() if _active_session in _operation_managers else None,
         **stats,
     }
-    if _HAS_SERVER_INTEGRATION:
-        mgr = _server_int._server_manager if _server_int else None
-        if mgr is not None:
-            try:
-                r["server"] = await mgr.get_status()
-            except Exception:
-                r["server"] = {"error": "status unavailable"}
-        else:
-            r["server"] = None
     return r
 
 
@@ -7994,6 +8063,7 @@ async def reset():
     async with _state_lock:
         game_history.clear()
         command_log.clear()
+        pending_manual_commands.clear()
     _session_histories.clear()
     _session_access_times.clear()
     _battle_plans.clear()
@@ -8033,10 +8103,26 @@ async def manual_command(request: Request):
         raise HTTPException(status_code=429, detail="Rate limit exceeded. Max 2 commands/sec, burst 10.")
     _manual_cmd_tokens -= 1.0
 
+    raw_body = bytearray()
+    async for chunk in request.stream():
+        if len(raw_body) + len(chunk) > 128 * 1024:
+            raise HTTPException(status_code=413, detail="Command batch exceeds 128 KiB")
+        raw_body.extend(chunk)
     try:
-        body = await request.json()
-    except Exception:
+        body = json.loads(raw_body, parse_float=_finite_json_float, parse_constant=_finite_json_float)
+    except (ValueError, RecursionError):
         raise HTTPException(status_code=400, detail="Invalid JSON")
+    if not isinstance(body, dict) or not isinstance(body.get("commands", []), list):
+        raise HTTPException(status_code=400, detail="Expected an object with a commands array")
+    if any(not isinstance(command, dict) or any(
+        not isinstance(value, str) for value in command.values()
+    ) for command in body.get("commands", [])):
+        raise HTTPException(status_code=400, detail="Expected command objects with string fields")
+    if any(not isinstance(body.get(field, ""), str) for field in ("narrative_broadcast", "weather_command")):
+        raise HTTPException(status_code=400, detail="Expected string broadcast and weather values")
+    time_override = body.get("time_override", -1)
+    if type(time_override) not in (int, float) or not -1 <= time_override <= 24:
+        raise HTTPException(status_code=400, detail="Expected time_override between -1 and 24")
     commands = _validate_command_batch(body)
     cmd_count = len(commands.get("commands", []))
     async with _state_lock:
@@ -8059,6 +8145,16 @@ async def manual_command(request: Request):
 
 @app.get("/api/pending-commands")
 async def get_pending_commands():
+    return _game_command_batch(await _take_pending_commands())
+
+
+def _game_command_batch(batch: dict) -> dict:
+    # Enfusion's JsonApiStruct expects only command batch fields, with an
+    # administrator-supplied broadcast preserved (unlike LLM broadcasts).
+    return {key: batch[key] for key in ("commands", "narrative_broadcast", "weather_command", "time_override")}
+
+
+async def _take_pending_commands() -> dict:
     async with _state_lock:
         if not pending_manual_commands:
             return empty_response()
@@ -8129,6 +8225,8 @@ async def set_session(request: Request):
         sid = body.get("session_id", "default")
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
+    if not _valid_session_id(sid):
+        raise HTTPException(status_code=400, detail="Invalid session identifier")
     _active_session = sid
     return {"status": "ok", "active_session": sid, "is_new": sid not in _session_histories}
 
@@ -8189,9 +8287,9 @@ async def reset_campaign():
 
 @app.get("/api/replays")
 async def list_replays():
-    _REPLAY_DIR.mkdir(parents=True, exist_ok=True)
-    files = sorted(_REPLAY_DIR.glob("*.jsonl.gz"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return {"replays": [{"filename": f.name, "size_bytes": f.stat().st_size, "modified": f.stat().st_mtime} for f in files[:50]]}
+    files = sorted(_state_files(_REPLAY_DIR, ".jsonl.gz"), key=lambda p: p.stat().st_mtime_ns, reverse=True)
+    return {"recording_enabled": _RECORD_REPLAYS,
+            "replays": [{"filename": f.name, "size_bytes": f.stat().st_size, "modified": f.stat().st_mtime} for f in files[:50]]}
 
 
 @app.get("/api/battle-summary/latest")
@@ -8211,19 +8309,19 @@ async def get_battle_summary_latest():
 @app.get("/api/battle-summary/{session_id}")
 async def get_battle_summary(session_id: str):
     """Generate an after-action report for a specific session."""
+    if not _valid_session_id(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session identifier")
     has_data = (
         session_id in _battle_plans
         or session_id in _session_stats
-        or any(f.name.startswith(session_id) for f in _REPLAY_DIR.glob("*.jsonl.gz"))
+        or any(_session_files(_REPLAY_DIR, session_id, ".jsonl.gz"))
     )
     if not has_data:
-        _BATTLE_SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
-        saved = sorted(_BATTLE_SUMMARIES_DIR.glob(f"{session_id}*.json"),
-                        key=lambda p: p.stat().st_mtime, reverse=True)
+        saved = sorted(_session_files(_BATTLE_SUMMARIES_DIR, session_id, ".json"),
+                        key=lambda p: p.stat().st_mtime_ns, reverse=True)
         if saved:
             try:
-                with open(saved[0], "r", encoding="utf-8") as f:
-                    return json.load(f)
+                return _read_state_json(saved[0])
             except Exception:
                 pass
         raise HTTPException(status_code=404,
@@ -8234,14 +8332,12 @@ async def get_battle_summary(session_id: str):
 @app.get("/api/battle-summaries")
 async def list_battle_summaries():
     """List all saved after-action reports."""
-    _BATTLE_SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
-    files = sorted(_BATTLE_SUMMARIES_DIR.glob("*.json"),
-                    key=lambda p: p.stat().st_mtime, reverse=True)
+    files = sorted(_state_files(_BATTLE_SUMMARIES_DIR, ".json"),
+                   key=lambda p: p.stat().st_mtime_ns, reverse=True)
     results = []
     for f in files[:50]:
         try:
-            with open(f, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
+            data = _read_state_json(f)
             results.append({
                 "filename": f.name,
                 "session_id": data.get("session_id", ""),
@@ -8280,27 +8376,28 @@ async def get_metrics():
 # ═══════════════════════════════════════════════════════════
 
 @app.post("/api/rcon")
+@app.post("/api/server/rcon")
 async def rcon_execute(request: Request):
     """Execute an RCON command on the game server.
 
     Accepts JSON body ``{"command": "<rcon command string>"}``.
     The command is validated against the whitelist before execution.
     """
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
-
-    command = body.get("command", "").strip()
-    if not command:
-        raise HTTPException(status_code=400, detail="Missing or empty 'command' field")
-
     if not _HAS_RCON:
         raise HTTPException(status_code=503, detail="RCON module not available")
     if not _RCON_ENABLED:
         raise HTTPException(status_code=503, detail="RCON is disabled by configuration")
     if _rcon_client is None or not _rcon_client.is_connected:
         raise HTTPException(status_code=503, detail="RCON client not connected to game server")
+
+    try:
+        body = await request.json()
+    except (ValueError, RecursionError):
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    command = body.get("command") if isinstance(body, dict) else None
+    if not isinstance(command, str) or not command.strip():
+        raise HTTPException(status_code=400, detail="Missing or empty 'command' field")
+    command = command.strip()
 
     result = await _execute_single_rcon_command(command, source="dashboard")
     http_status = 200 if result["status"] == "ok" else (
@@ -8310,6 +8407,7 @@ async def rcon_execute(request: Request):
         status_code=http_status,
         content={
             "status": result["status"],
+            "success": result["status"] == "ok",
             "command": result["command"],
             "response": result["response"],
             "timestamp": result["timestamp"],
@@ -8344,14 +8442,9 @@ async def rcon_status():
 
 
 if __name__ == "__main__":
-    from h2c_proxy import start_proxy
-    import uvicorn
+    from hypercorn.asyncio import serve
+    from hypercorn.config import Config
 
-    public_port = int(os.getenv("PORT", "8080"))
-    internal_port = public_port + 1
-
-    # Start TCP proxy that strips Enfusion h2c headers (daemon thread)
-    start_proxy(listen_port=public_port, forward_port=internal_port)
-
-    # Run uvicorn on internal port — proxy forwards clean HTTP/1.1 here
-    uvicorn.run(app, host="127.0.0.1", port=internal_port)
+    config = Config()
+    config.bind = [f"127.0.0.1:{int(os.getenv('PORT', '8080'))}"]
+    asyncio.run(serve(app, config))

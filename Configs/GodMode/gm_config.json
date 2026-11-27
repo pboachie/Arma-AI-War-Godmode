@@ -1,31 +1,31 @@
 {
   "version": "2.1.0",
   "middleware": {
-    "url": "http://localhost:8000",
+    "url": "http://127.0.0.1:8080",
     "health_endpoint": "/health",
     "rcon_relay": {
       "enabled": false,
       "address": "127.0.0.1",
       "port": 19999,
-      "permission": "admin"
+      "permission": "monitor"
     }
   },
   "server": {
-    "max_players": 124,
-    "ai_limit": -1,
-    "view_distance": 2500,
-    "network_view_distance": 2500,
+    "max_players": 24,
+    "ai_limit": 64,
+    "view_distance": 1600,
+    "network_view_distance": 1500,
     "disable_third_person": true,
     "battlEye": true,
     "player_save_time_seconds": 120,
     "slot_reservation_timeout_seconds": 60,
     "join_queue_max_size": 12,
-    "supported_platforms": ["PLATFORM_PC", "PLATFORM_XBL"],
+    "supported_platforms": ["PLATFORM_PC"],
     "region": "US-LA"
   },
   "game_master": {
     "update_interval_seconds": 30,
-    "llm_enabled": true,
+    "llm_enabled": false,
     "max_ai_squads": 30,
     "max_vehicles": 20,
     "max_dead_bodies": 30,

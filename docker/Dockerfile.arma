@@ -25,7 +25,7 @@ RUN mkdir -p \
     /home/reforger/workshop \
     /home/reforger/reforger_bins
 
-RUN wget -qO /tmp/steamcmd_linux.tar.gz \
+RUN wget --https-only -qO /tmp/steamcmd_linux.tar.gz \
         https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz && \
     tar -xzf /tmp/steamcmd_linux.tar.gz -C /home/reforger/steamcmd && \
     rm /tmp/steamcmd_linux.tar.gz
@@ -36,6 +36,6 @@ RUN chown -R reforger:reforger /home/reforger
 USER reforger
 WORKDIR /home/reforger
 
-EXPOSE 2001/udp 17777/udp 19999/udp
+EXPOSE 2001/udp
 
 ENTRYPOINT ["python3", "/home/reforger/launch.py"]

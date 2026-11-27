@@ -1,55 +1,32 @@
 {
-  "bindAddress": "",
-  "bindPort": __GAME_PORT__,
-  "publicAddress": "",
-  "publicPort": __GAME_PORT__,
+  "bindAddress": "127.0.0.1",
+  "bindPort": 2001,
+  "publicPort": 2001,
   "a2s": {
-    "address": "0.0.0.0",
-    "port": __A2S_PORT__
-  },
-  "rcon": {
-    "address": "__RCON_BIND_ADDRESS__",
-    "port": __RCON_PORT__,
-    "password": "__RCON_PASSWORD__",
-    "maxClients": 16,
-    "permission": "admin",
-    "blacklist": [],
-    "whitelist": []
+    "address": "127.0.0.1",
+    "port": 17777
   },
   "game": {
-    "name": "__SERVER_NAME__",
+    "name": "AI War (private test)",
     "password": "",
-    "passwordAdmin": "__ADMIN_PASSWORD__",
+    "passwordAdmin": "",
     "admins": [],
-    "scenarioId": "{__SCENARIO_ID__}ArmaReforger/Worlds/MP/CTI_Everon.ent",
-    "maxPlayers": __MAX_PLAYERS__,
-    "visible": true,
-    "crossPlatform": true,
-    "supportedPlatforms": ["PLATFORM_PC", "PLATFORM_XBL"],
+    "scenarioId": "{ECC61978EDCC2B5A}Missions/23_Campaign.conf",
+    "maxPlayers": 24,
+    "visible": false,
+    "crossPlatform": false,
+    "supportedPlatforms": ["PLATFORM_PC"],
     "gameProperties": {
-      "serverMaxViewDistance": 2500,
+      "serverMaxViewDistance": 1600,
       "serverMinGrassDistance": 50,
-      "networkViewDistance": 2500,
-      "disableThirdPerson": true,
+      "networkViewDistance": 1500,
       "fastValidation": true,
-      "battlEye": true,
-      "VONDisableUI": false,
-      "VONDisableDirectSpeechUI": false,
-      "VONCanTransmitCrossFaction": false
+      "battlEye": true
     },
     "mods": []
   },
   "operating": {
     "lobbyPlayerSynchronise": true,
-    "disableCrashReporter": false,
-    "disableNavmeshStreaming": [],
-    "disableServerShutdown": false,
-    "disableAI": false,
-    "playerSaveTime": 120,
-    "aiLimit": -1,
-    "slotReservationTimeout": 60,
-    "joinQueue": {
-      "maxSize": 12
-    }
+    "aiLimit": 64
   }
 }

@@ -35,6 +35,7 @@ VPS_FILES = (
     "middleware/server.py",
     "middleware/server_integration.py",
     "middleware/server_manager.py",
+    "middleware/side_operations.py",
     "middleware/tactical_objectives.py",
     "scripts/install-vps.sh",
     "scripts/stop.sh",

@@ -8,11 +8,13 @@ python3 -m venv .venv
 python -m pip install --require-hashes --only-binary=:all: -r middleware/requirements.txt -r tests/requirements.txt
 python -m pip check
 python -m unittest discover -s tests
-python -m pytest -q middleware/test_runtime_security.py
+python -m pytest -q middleware/test_runtime_security.py middleware/test_side_operations.py
 for script in scripts/bootstrap-release.sh scripts/bootstrap-vps.sh scripts/install-vps.sh middleware/start.sh scripts/stop.sh; do bash -n "$script"; done
 ```
 
 These checks use synthetic game data and no model credentials. The middleware health check only tests liveness. Before making claims about in-game integration, verify an authenticated report and a visible game response from the intended Workshop addon and game build. [Addon setup](ADDON_SETUP.md)
+
+The side-operation tests exercise the existing authenticated report endpoint. The optional v1 start is returned once, on a report matching the original Core session and revision. Polling for legacy commands cannot consume it. Only Core reports outcomes. An acknowledgement timeout affects retry policy without creating an outcome.
 
 For recovery testing, stop the private middleware long enough to trigger the retry cooldown, then start it again. Verify that reporting resumes without restarting the game server.
 

@@ -15,7 +15,22 @@ This is a source integration workflow. The checked-in Western Everon world and l
 
 Bundle your reviewed addon with Workbench. If distributing it through Workshop, use a test release and confirm the intended game branch, publisher, addon ID, version, and dependencies. Install the same reviewed build on the dedicated server and participating clients. Do not trust an addon based only on its display name. [Bohemia Mod Publishing Process](https://community.bohemia.net/wiki/Arma_Reforger:Mod_Publishing_Process)
 
-Generate the dedicated-server config as in [Server setup](SERVER_SETUP.md#2-generate-a-private-configuration). Set `ARMA_SCENARIO_ID` to your full mission-header resource ID before generation or set `game.scenarioId` directly in the private output. For a Workshop build, add the exact trusted Workshop `modId` and `version` to `game.mods`. An addon ID identifies the build to load. A scenario ID identifies the mission to run. Confirm both against the dedicated-server startup log. [Bohemia Server Config reference](https://community.bohemia.net/wiki/Arma_Reforger:Server_Config)
+Generate the dedicated-server config as in [Server setup](SERVER_SETUP.md#2-generate-a-private-configuration). For a Workshop build, save a separate JSON array of exact pins as `workshop-mods.json` in your private configuration directory. The following is a pin for the existing AI War - Core release, not a recommendation to run an AI-powered match with it.
+
+```json
+[
+  {"modId": "68EB7BF2F5940DD9", "name": "AI War - Core", "version": "1.0.6"}
+]
+```
+
+```bash
+python3 scripts/generate_config.py --env-file "$arma_private/arma.env" \
+  --mods-file "$arma_private/workshop-mods.json" --output "$arma_private/config.json"
+```
+
+`--mods-file` sets `game.mods` in file order. Use the same reviewed file when regenerating the config. Include any required Workshop dependencies at their reviewed versions. Set `ARMA_SCENARIO_ID` separately if the addon supplies a compatible custom mission. An addon ID identifies the build to load. It is not a scenario ID. The `-listScenarios` output for the loaded addons and the startup log are the checks for the full mission `.conf` resource ID and the installed addon versions. [Bohemia Server Config reference](https://community.bohemia.net/wiki/Arma_Reforger:Server_Config)
+
+**Published AI War - Core 1.0.6:** The Workshop listing reports no selectable scenarios for this version. The published version predates the server-profile game key and does not send the header required by this middleware. Installing `godmode_api_key.txt` does not add that capability to the packaged addon. You can test the pin privately alongside a supported stock scenario, but loading the addon is not a working AI game bridge. Use a compatible, reviewed addon build for the authenticated test below. Do not disable authentication or expose the middleware to work around a version mismatch. [Workshop listing](https://reforger.armaplatform.com/workshop/68EB7BF2F5940DD9)
 
 ## 3. Install the game key on the server only
 

@@ -85,6 +85,32 @@ def _scenario(value: str, vanilla: str) -> str:
     return value
 
 
+def read_mods_file(path: Path) -> list[dict[str, str]]:
+    """Read an explicit list of Workshop version pins, in load order."""
+    try:
+        mods = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ConfigError("Workshop mods file must be valid UTF-8 JSON") from exc
+    if not isinstance(mods, list):
+        raise ConfigError("Workshop mods file must contain a JSON array")
+    seen: set[str] = set()
+    for index, mod in enumerate(mods, 1):
+        if not isinstance(mod, dict) or mod.keys() - {"modId", "name", "version"}:
+            raise ConfigError(f"Workshop mod entry {index} must contain modId, version, and optionally name")
+        mod_id, version = mod.get("modId"), mod.get("version")
+        if not isinstance(mod_id, str) or not re.fullmatch(r"[0-9A-Fa-f]{16}", mod_id):
+            raise ConfigError(f"Workshop mod entry {index} needs a 16-digit hexadecimal modId")
+        if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+            raise ConfigError(f"Workshop mod entry {index} needs an exact numeric major.minor.patch version")
+        name = mod.get("name")
+        if "name" in mod and (not isinstance(name, str) or not name.strip() or not name.isprintable()):
+            raise ConfigError(f"Workshop mod entry {index} has an invalid name")
+        if mod_id.upper() in seen:
+            raise ConfigError(f"Workshop mod entry {index} repeats a modId")
+        seen.add(mod_id.upper())
+    return mods
+
+
 def _render(config: dict, values: Mapping[str, str]) -> dict:
     game, a2s = config["game"], config["a2s"]
     get = values.get
@@ -139,10 +165,13 @@ def _render(config: dict, values: Mapping[str, str]) -> dict:
 
 
 def generate_config(template_path: Path = TEMPLATE_PATH, output_path: Path = OUTPUT_PATH, *,
-                    values: Mapping[str, str] | None = None, force: bool = False) -> Path:
+                    values: Mapping[str, str] | None = None, force: bool = False,
+                    mods_file: Path | None = None) -> Path:
     """Validate and atomically create the output; no replacement without force."""
     config = _render(json.loads(template_path.read_text(encoding="utf-8")),
                      os.environ if values is None else values)
+    if mods_file is not None:
+        config["game"]["mods"] = read_mods_file(mods_file)
     output_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if output_path.is_symlink():
         raise ConfigError("Refusing to write config to a symbolic link")
@@ -174,13 +203,14 @@ def generate_config(template_path: Path = TEMPLATE_PATH, output_path: Path = OUT
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", type=Path, help="Private Arma settings file (otherwise use exported ARMA_* settings)")
+    parser.add_argument("--mods-file", type=Path, help="JSON array of exact Workshop modId/version pins")
     parser.add_argument("--output", type=Path, default=OUTPUT_PATH, help="Destination config.json")
     parser.add_argument("--force", action="store_true", help="Replace an existing config; back it up first")
     args = parser.parse_args()
     try:
         values = read_env_file(args.env_file) if args.env_file is not None else {}
         values.update({key: os.environ[key] for key in ENV_KEYS if key in os.environ})
-        out = generate_config(output_path=args.output, values=values, force=args.force)
+        out = generate_config(output_path=args.output, values=values, force=args.force, mods_file=args.mods_file)
     except (ConfigError, OSError) as exc:
         parser.exit(1, f"Config not written: {exc}\n")
     print(f"Config generated: {out}")

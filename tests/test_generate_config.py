@@ -32,6 +32,7 @@ class GenerateConfigTests(unittest.TestCase):
         self.assertEqual(result["game"]["scenarioId"], "{ECC61978EDCC2B5A}Missions/23_Campaign.conf")
         self.assertTrue(result["game"]["gameProperties"]["battlEye"])
         self.assertFalse(result["game"]["visible"])
+        self.assertEqual(result["game"]["mods"], [])
         self.assertNotIn("rcon", result)
         if os.name == "posix":
             self.assertEqual(stat.S_IMODE(self.output.stat().st_mode), 0o600)
@@ -81,6 +82,39 @@ class GenerateConfigTests(unittest.TestCase):
         env = self.root / "arma.env"
         env.write_text(f"# Private settings\nARMA_ADMIN_PASSWORD='{ADMIN}'\nLLM_PROVIDER=disabled\n", encoding="utf-8")
         self.assertEqual(read_env_file(env), {"ARMA_ADMIN_PASSWORD": ADMIN})
+
+    def test_workshop_pins_round_trip_in_order_without_changing_scenario(self):
+        mods = [{"modId": "68EB7BF2F5940DD9", "name": "AI War - Core", "version": "1.0.6"},
+                {"modId": "0123456789ABCDEF", "version": "2.1.0"}]
+        mods_file = self.root / "workshop-mods.json"
+        mods_file.write_text(json.dumps(mods), encoding="utf-8-sig")
+        args = dict(output_path=self.output, values={"ARMA_ADMIN_PASSWORD": ADMIN}, mods_file=mods_file)
+        for force in (False, True):
+            game = json.loads(generate_config(**args, force=force).read_text(encoding="utf-8"))["game"]
+            self.assertEqual(game["mods"], mods)
+            self.assertEqual(game["scenarioId"], "{ECC61978EDCC2B5A}Missions/23_Campaign.conf")
+
+    def test_invalid_workshop_pins_do_not_replace_existing_output(self):
+        self.generate()
+        original = self.output.read_bytes()
+        mods_file = self.root / "workshop-mods.json"
+        pin = {"modId": "68EB7BF2F5940DD9", "version": "1.0.6"}
+        for value in (pin, [None], [{"modId": pin["modId"]}], [dict(pin, version="latest")],
+                      [dict(pin, version=106)], [dict(pin, modId="invalid")], [dict(pin, name="\n")],
+                      [dict(pin, unexpected=True)], [pin, dict(pin, modId=pin["modId"].lower())]):
+            with self.subTest(value=value):
+                mods_file.write_text(json.dumps(value), encoding="utf-8")
+                with self.assertRaises(ConfigError):
+                    generate_config(output_path=self.output, values={"ARMA_ADMIN_PASSWORD": ADMIN},
+                                    mods_file=mods_file, force=True)
+                self.assertEqual(self.output.read_bytes(), original)
+
+    def test_malformed_workshop_json_does_not_write_output(self):
+        mods_file = self.root / "workshop-mods.json"
+        mods_file.write_text("[{", encoding="utf-8")
+        with self.assertRaisesRegex(ConfigError, "valid UTF-8 JSON"):
+            generate_config(output_path=self.output, values={"ARMA_ADMIN_PASSWORD": ADMIN}, mods_file=mods_file)
+        self.assertFalse(self.output.exists())
 
 
 if __name__ == "__main__":

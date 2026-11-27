@@ -69,10 +69,10 @@ def _address(value: str, key: str) -> ipaddress.IPv4Address:
         raise ConfigError(f"{key} must be an IPv4 address") from None
 
 
-def _password(value: str, key: str) -> str:
-    if (not re.fullmatch(r"[!-~]{20,128}", value) or len(set(value)) < 8
+def _password(value: str, key: str, *, max_length: int = 128) -> str:
+    if (not 20 <= len(value) <= max_length or not re.fullmatch(r"[!-~]+", value) or len(set(value)) < 8
             or value.lower().startswith(("changeme", "choose-", "replace-", "your-"))):
-        raise ConfigError(f"{key} needs a unique random password of 20–128 printable ASCII characters without spaces")
+        raise ConfigError(f"{key} needs a unique random password of 20–{max_length} printable ASCII characters without spaces")
     return value
 
 
@@ -114,10 +114,10 @@ def read_mods_file(path: Path) -> list[dict[str, str]]:
 def _render(config: dict, values: Mapping[str, str]) -> dict:
     game, a2s = config["game"], config["a2s"]
     get = values.get
-    admin = _password(get("ARMA_ADMIN_PASSWORD", ""), "ARMA_ADMIN_PASSWORD")
+    admin = _password(get("ARMA_ADMIN_PASSWORD", ""), "ARMA_ADMIN_PASSWORD", max_length=32)
     join = get("ARMA_GAME_PASSWORD", "")
     if join:
-        _password(join, "ARMA_GAME_PASSWORD")
+        _password(join, "ARMA_GAME_PASSWORD", max_length=32)
         if join == admin:
             raise ConfigError("ARMA_GAME_PASSWORD and ARMA_ADMIN_PASSWORD must differ")
     name = get("ARMA_SERVER_NAME", game["name"])

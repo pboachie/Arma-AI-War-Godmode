@@ -46,6 +46,8 @@ class GenerateConfigTests(unittest.TestCase):
         for options in (
             {"ARMA_ADMIN_PASSWORD": ""},
             {"ARMA_ADMIN_PASSWORD": "changeme"},
+            {"ARMA_ADMIN_PASSWORD": (ADMIN * 2)[:33]},
+            {"ARMA_GAME_PASSWORD": (RCON * 2)[:33]},
             {"ARMA_RCON_ENABLED": "true", "ARMA_RCON_PASSWORD": ADMIN},
             {"ARMA_RCON_ENABLED": "true", "ARMA_RCON_PASSWORD": RCON, "ARMA_RCON_BIND_ADDRESS": "0.0.0.0"},
             {"ARMA_GAME_PORT": "0"},
@@ -56,6 +58,14 @@ class GenerateConfigTests(unittest.TestCase):
             with self.subTest(options=tuple(options)), self.assertRaises(ConfigError):
                 self.generate(**options)
             self.assertFalse(self.output.exists())
+
+    def test_game_password_schema_limit_does_not_apply_to_rcon(self):
+        admin, join, rcon = (ADMIN * 2)[:32], (RCON * 2)[:32], RCON * 2
+        result = json.loads(self.generate(ARMA_ADMIN_PASSWORD=admin, ARMA_GAME_PASSWORD=join,
+                                         ARMA_RCON_ENABLED="true", ARMA_RCON_PASSWORD=rcon).read_text())
+        self.assertEqual(result["game"]["passwordAdmin"], admin)
+        self.assertEqual(result["game"]["password"], join)
+        self.assertEqual(result["rcon"]["password"], rcon)
 
     def test_replacement_requires_force(self):
         self.output.parent.mkdir()

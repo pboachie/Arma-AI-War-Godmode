@@ -4,6 +4,7 @@
 !server.py
 !agents.py
 !scaling_engine.py
+!side_operations.py
 !tactical_objectives.py
 !auth.py
 !dashboard.html

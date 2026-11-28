@@ -37,6 +37,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import urlsplit
+from side_operations import (
+    SIDE_OPERATION_PROMPT,
+    SideOperationDecision,
+    SideOperationLoop,
+    SideOperationReport,
+    parse_side_operation_choice,
+)
 from tactical_objectives import generate_tactical_objectives as _tac_obj_impl
 from tactical_objectives import inject_tactical_intel as _tac_intel_impl
 
@@ -816,6 +823,49 @@ class GameSitrep(SitrepModel):
     terrain_samples: list[SitrepTerrainSample] = Field(default_factory=list)
     vehicle_states: list[SitrepVehicle] = Field(default_factory=list)
     recent_events: list[str | SitrepEvent] = Field(default_factory=list)
+    mission_state: dict | None = None
+    side_operations: SideOperationReport | None = None
+
+    @field_validator("mission_state", mode="before")
+    @classmethod
+    def validate_mission_state(cls, value):
+        """Keep only bounded GM_MissionState fields, without invalidating legacy telemetry."""
+        if not isinstance(value, dict):
+            return None
+
+        def text_field(item):
+            return isinstance(item, str) and len(item) <= 128 and (not item or item.isprintable())
+
+        result = {}
+        for field in ("active_scenario_id", "active_archetype", "escalation_curve", "current_phase",
+                      "alert_level", "force_ratio_assessment", "recommended_next_archetype"):
+            item = value.get(field)
+            if text_field(item):
+                result[field] = item
+        for field in ("waves_completed", "total_player_kills", "total_player_deaths",
+                      "total_opfor_spawned", "total_opfor_destroyed"):
+            item = value.get(field)
+            if type(item) is int and 0 <= item <= 2_147_483_647:
+                result[field] = item
+        for field in ("phase_intensity", "mission_progress_pct", "opfor_casualty_rate", "player_casualty_rate"):
+            item = value.get(field)
+            if type(item) in (int, float) and 0 <= item <= 1:
+                result[field] = item
+        for field in ("completed_objectives", "failed_objectives", "active_minefields"):
+            item = value.get(field)
+            if isinstance(item, list):
+                result[field] = [entry for entry in item[-32:] if text_field(entry)]
+        return result or None
+
+    @field_validator("side_operations", mode="wrap")
+    @classmethod
+    def validate_side_operations(cls, value, handler):
+        try:
+            return handler(value)
+        except ValidationError:
+            # Negotiation is opt-in. A malformed or unsupported extension must
+            # not prevent the report from participating in the normal game loop.
+            return None
 
     @model_validator(mode="before")
     @classmethod
@@ -3848,6 +3898,8 @@ _reset_lock = asyncio.Lock()
 _session_epoch = 0
 _resetting = False
 _summary_jobs: set[asyncio.Task] = set()
+_side_operations = SideOperationLoop()
+_side_operation_task: asyncio.Task | None = None
 
 
 def _assert_session_current(epoch: int) -> None:
@@ -3862,7 +3914,7 @@ def _track_summary(job: asyncio.Task) -> asyncio.Task:
 
 
 async def _cancel_session_work() -> None:
-    pending = {*_inflight_calls.values(), *_summary_jobs, _background_llm_task}
+    pending = {*_inflight_calls.values(), *_summary_jobs, _background_llm_task, _side_operation_task}
     tasks = [task for task in pending if task is not None and not task.done() and task is not asyncio.current_task()]
     for task in tasks:
         task.cancel()
@@ -7480,8 +7532,8 @@ async def dashboard():
 _background_llm_task: Optional[asyncio.Task] = None
 
 
-def _sanitize_response(commands: dict) -> dict:
-    """Strip to only fields Enfusion's GM_CommandBatch.RegV() declares.
+def _sanitize_response(commands: dict, *, side_operation_start: dict | None = None) -> dict:
+    """Strip legacy commands to the Enfusion batch fields, then attach an optional Core start.
     Narrative broadcasts are suppressed — the LLM fabricates them
     and they don't reflect real game events."""
     sanitized_cmds = []
@@ -7497,12 +7549,55 @@ def _sanitize_response(commands: dict) -> dict:
         if c.get("command_type") not in ("objective_create", "objective_complete", "objective_fail"):
             c["narrative"] = ""      # strip per-command narrative on other types
         sanitized_cmds.append(c)
-    return {
+    response = {
         "commands": sanitized_cmds,
         "narrative_broadcast": "",    # always blank — not real
         "weather_command": commands.get("weather_command", ""),
         "time_override": commands.get("time_override", -1),
     }
+    if side_operation_start is not None:
+        # Only the scoped side-operation loop, never the raw model or legacy
+        # command cache, can supply this sibling of the legacy batch fields.
+        response["side_operation_start"] = side_operation_start
+    return response
+
+
+async def _choose_side_operation(
+    decision: SideOperationDecision, mission_state: dict | None, campaign_id: str, epoch: int,
+) -> None:
+    choice = 0
+    try:
+        messages = [
+            SystemMessage(content=SIDE_OPERATION_PROMPT),
+            HumanMessage(content=decision.prompt_data(mission_state)),
+        ]
+        async with asyncio.timeout(75.0):
+            response = await _invoke_llm_with_retry(_get_llm(), messages, caller_label="side_operation")
+        choice = parse_side_operation_choice(_provider_response_text(response))
+    except Exception as exc:
+        log.warning("Side-operation selection unavailable: %s", _provider_error_label(exc))
+
+    async with _state_lock:
+        current = (not _resetting and epoch == _session_epoch
+                   and campaign_id == _campaign_state.campaign_id and _llm_enabled())
+        _side_operations.resolve(decision, choice if current else 0)
+
+
+def _advance_side_operations(report: SideOperationReport | None, game_state: dict, epoch: int) -> dict | None:
+    """Observe this authenticated report and atomically consume at most one reply."""
+    global _side_operation_task
+    campaign_id = _campaign_state.campaign_id
+    scope = (game_state["mission_id"], campaign_id, epoch)
+    if not _side_operations.observe(report, scope, can_start=_llm_enabled() and game_state["player_count"] > 0):
+        return None
+    start = _side_operations.take_start()
+    if start is None and (_side_operation_task is None or _side_operation_task.done()):
+        decision = _side_operations.begin_decision()
+        if decision is not None:
+            _side_operation_task = asyncio.create_task(
+                _choose_side_operation(decision, game_state.get("mission_state"), campaign_id, epoch),
+            )
+    return start
 
 
 # ═══════════════════════════════════════════════════════════
@@ -7958,6 +8053,7 @@ async def game_master(request: Request):
         if _resetting or epoch != _session_epoch:
             return _game_command_batch(empty_response())
         game_history.append({"timestamp": time.time(), "state": game_state})
+        side_start = _advance_side_operations(validated.side_operations, game_state, epoch)
 
     player_count = game_state.get("player_count", 0)
     mission_time = game_state.get("mission_time_seconds", 0)
@@ -8064,14 +8160,14 @@ async def game_master(request: Request):
             cmd_count = len(cached.get("commands", []))
             log.info("Cached %d cmds already delivered for session %s — returning empty",
                      cmd_count, session_id)
-            return _sanitize_response(empty_response())
+            return _sanitize_response(empty_response(), side_operation_start=side_start)
         cmd_count = len(cached.get("commands", []))
         log.info("Returning cached %d cmds (bg processing)", cmd_count)
         _delivered_sessions.add(session_id)
-        return _sanitize_response(cached)
+        return _sanitize_response(cached, side_operation_start=side_start)
 
     log.info("No cached commands yet (first SITREP), returning empty")
-    return _sanitize_response(empty_response())
+    return _sanitize_response(empty_response(), side_operation_start=side_start)
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])
@@ -8189,13 +8285,14 @@ async def get_stats():
 
 @app.post("/api/reset")
 async def reset():
-    global _session_epoch, _resetting, _background_llm_task
+    global _session_epoch, _resetting, _background_llm_task, _side_operation_task
     async with _reset_lock:
         _resetting = True
         _session_epoch += 1
         try:
             await _cancel_session_work()
             _background_llm_task = None
+            _side_operation_task = None
             return await _clear_session_state()
         finally:
             _resetting = False
@@ -8214,6 +8311,7 @@ async def _clear_session_state():
         game_history.clear()
         command_log.clear()
         pending_manual_commands.clear()
+        _side_operations.invalidate()
     _session_histories.clear()
     _session_access_times.clear()
     _battle_plans.clear()
@@ -8381,6 +8479,8 @@ async def set_session(request: Request):
         raise HTTPException(status_code=400, detail="Invalid JSON")
     if not _valid_session_id(sid):
         raise HTTPException(status_code=400, detail="Invalid session identifier")
+    if sid != _active_session:
+        _side_operations.invalidate()
     _active_session = sid
     return {"status": "ok", "active_session": sid, "is_new": sid not in _session_histories}
 
@@ -8429,6 +8529,7 @@ async def reset_campaign():
     old_name = _campaign_state.campaign_name
     old_sessions = _campaign_state.session_count
     _campaign_state.reset()
+    _side_operations.invalidate()
     _campaign_state.start_session()
     return {
         "status": "reset",

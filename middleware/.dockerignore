@@ -8,6 +8,9 @@
 !tactical_objectives.py
 !auth.py
 !dashboard.html
+!dashboard.js
+!everon-map.jpg
+!everon-map.NOTICE.md
 !server_integration.py
 !server_manager.py
 !rcon_client.py

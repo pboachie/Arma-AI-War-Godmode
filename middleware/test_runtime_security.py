@@ -649,9 +649,52 @@ def test_dashboard_is_a_nonced_shell_without_external_code(runtime):
     assert first.text.count(f'nonce="{nonce}"') == 2
     assert nonce not in second.headers["content-security-policy"]
     assert "connect-src 'self'" in policy and "'unsafe-inline'" not in policy
+    assert "img-src blob:" in policy
     assert ADMIN not in first.text and GAME not in first.text
     assert '<div id="console" hidden>' in first.text
     for missing in ("<script src=", "<link", "innerHTML", "EventSource", "localStorage", "sessionStorage"):
         assert missing not in first.text
     assert 'mode: "same-origin", redirect: "error"' in first.text
     assert ".textContent" in first.text
+
+
+def test_dashboard_everon_image_requires_only_the_admin_key(runtime):
+    import hashlib
+
+    client = TestClient(runtime().app)
+    path = "/api/dashboard/maps/everon"
+    assert client.get(path).status_code == 401
+    assert client.get(path, headers=GAME_HEADER).status_code == 401
+    assert client.get("/api/dashboard/maps/anything-else", headers=ADMIN_HEADER).status_code == 404
+    image = client.get(path, headers=ADMIN_HEADER)
+    assert image.status_code == 200
+    assert image.headers["content-type"] == "image/jpeg"
+    assert image.headers["cache-control"] == "no-store"
+    assert hashlib.sha256(image.content).hexdigest() == "c2c86822d9b3aaa49c5defbd8b1f09d2c982f6cbd0dea5b307cb74b029e50d63"
+
+
+def test_dashboard_terrain_setting_is_an_allowlisted_hint(runtime, monkeypatch):
+    client = TestClient(runtime().app)
+    monkeypatch.delenv("GODMODE_DASHBOARD_MAP", raising=False)
+    assert 'data-terrain=""' in client.get("/dashboard").text
+    monkeypatch.setenv("GODMODE_DASHBOARD_MAP", "everon")
+    assert 'data-terrain="everon"' in client.get("/dashboard").text
+    monkeypatch.setenv("GODMODE_DASHBOARD_MAP", '"test-attribute="injected')
+    html = client.get("/dashboard").text
+    assert 'data-terrain=""' in html
+    assert "test-attribute" not in html
+
+
+def test_command_log_accepts_a_bounded_display_limit(runtime):
+    app = runtime()
+    client = TestClient(app.app)
+    for i in range(24):
+        app.command_log.append({"timestamp": i, "source": "manual", "commands": []})
+    path = "/api/command-log"
+    assert client.get(path + "?limit=12", headers=GAME_HEADER).status_code == 401
+    data = client.get(path + "?limit=12", headers=ADMIN_HEADER).json()
+    assert data["total"] == 24
+    assert [row["timestamp"] for row in data["commands"]] == list(range(12, 24))
+    assert len(client.get(path, headers=ADMIN_HEADER).json()["commands"]) == 24
+    for invalid in ("0", "-1", "51", "not-an-integer"):
+        assert client.get(path + "?limit=" + invalid, headers=ADMIN_HEADER).status_code == 422

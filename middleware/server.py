@@ -35,7 +35,7 @@ import uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 from urllib.parse import urlsplit
 from side_operations import (
     SIDE_OPERATION_PROMPT,
@@ -64,9 +64,9 @@ from scaling_engine import (
 )
 from agents import AgentOrchestrator, create_orchestrator
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from auth import APIKeyMiddleware, RateLimitMiddleware, SecurityHeadersMiddleware
 
@@ -7520,12 +7520,23 @@ def _parse_game_master_body(raw_body: bytes) -> dict:
 async def dashboard():
     nonce = secrets.token_urlsafe(24)
     html = (_SOURCE_DIR / "dashboard.html").read_text(encoding="utf-8")
+    script = (_SOURCE_DIR / "dashboard.js").read_text(encoding="utf-8")
+    # Core SITREPs don't identify the loaded terrain. Only honor a known admin choice.
+    terrain = "everon" if os.getenv("GODMODE_DASHBOARD_MAP", "").strip().lower() == "everon" else ""
+    html = html.replace('data-terrain="GODMODE_DASHBOARD_MAP"', f'data-terrain="{terrain}"')
+    html = html.replace('nonce="GODMODE_CSP_NONCE"', f'nonce="{nonce}"')
+    html = html.replace("GODMODE_DASHBOARD_SCRIPT", script, 1)
     policy = (
         f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; "
-        "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+        "connect-src 'self'; img-src blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     )
-    return HTMLResponse(html.replace('nonce="GODMODE_CSP_NONCE"', f'nonce="{nonce}"'),
-                        headers={"Content-Security-Policy": policy})
+    return HTMLResponse(html, headers={"Content-Security-Policy": policy})
+
+
+@app.get("/api/dashboard/maps/everon", include_in_schema=False)
+async def dashboard_everon_map():
+    # Deliberately not a public route or a path-parameter-based file server.
+    return FileResponse(_SOURCE_DIR / "everon-map.jpg", media_type="image/jpeg")
 
 
 # Background task: runs the LLM pipeline and caches results for the next SITREP.
@@ -8424,8 +8435,8 @@ async def _take_pending_commands(epoch: int | None = None) -> dict:
 
 
 @app.get("/api/command-log")
-async def get_command_log():
-    return {"commands": list(command_log)[-50:], "total": len(command_log)}
+async def get_command_log(limit: Annotated[int, Query(ge=1, le=50)] = 50):
+    return {"commands": list(command_log)[-limit:], "total": len(command_log)}
 
 
 # ── Memory & Intelligence ──

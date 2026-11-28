@@ -9,6 +9,7 @@ python -m pip install --require-hashes --only-binary=:all: -r middleware/require
 python -m pip check
 python -m unittest discover -s tests
 python -m pytest -q middleware/test_runtime_security.py middleware/test_side_operations.py
+node --test tests/test_tactical_dashboard.cjs
 for script in scripts/bootstrap-release.sh scripts/bootstrap-vps.sh scripts/install-vps.sh middleware/start.sh scripts/stop.sh; do bash -n "$script"; done
 ```
 

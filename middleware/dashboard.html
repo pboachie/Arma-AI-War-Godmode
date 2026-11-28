@@ -86,6 +86,18 @@
     .map-footer a { color: inherit; }
     .sidebar { display: grid; gap: 10px; }
     .sidebar h2 { margin-bottom: 6px; }
+    .view-nav { display: flex; gap: 5px; padding: 5px; }
+    .view-nav button { flex: 1; padding: 5px; }
+    .view-nav button[aria-pressed="true"] { border-color: var(--green); color: var(--green); background: #263a2a; }
+    .side-view { display: grid; gap: 10px; min-width: 0; }
+    .kv { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 3px 9px; margin: 0 0 7px; font-size: .84rem; }
+    .kv dt { color: var(--muted); }
+    .kv dd { margin: 0; overflow-wrap: anywhere; }
+    .wrap-text { overflow-wrap: anywhere; white-space: pre-wrap; }
+    #chat-history { max-height: min(48vh, 430px); margin: 7px 0; }
+    #chat-history li { background: #152018; padding: 7px 9px 8px; border: 1px solid var(--border); border-radius: 6px; }
+    #chat-history li[data-role="user"] { background: var(--raised); }
+    #chat-input { min-height: 72px; }
     .scroll-list { list-style: none; display: grid; gap: 7px; margin: 0; padding: 0; max-height: 288px; overflow: auto; }
     .scroll-list li { border-top: 1px solid var(--border); padding: 6px 2px 1px; }
     .scroll-list li:first-child { border-top: 0; padding-top: 0; }
@@ -201,6 +213,12 @@
           </div>
         </section>
         <aside class="sidebar" aria-label="Operations and operator tools">
+          <nav class="panel view-nav" aria-label="Dashboard views">
+            <button type="button" data-side-view="situation" aria-controls="view-situation" aria-pressed="true">Situation</button>
+            <button type="button" data-side-view="operations" aria-controls="view-operations" aria-pressed="false">AI operations</button>
+            <button type="button" data-side-view="chat" aria-controls="view-chat" aria-pressed="false">Chat</button>
+          </nav>
+          <div id="view-situation" class="side-view">
           <section class="panel" aria-labelledby="mission-heading">
             <h2 id="mission-heading">Objectives</h2>
             <p id="side-operation" class="operation" hidden></p>
@@ -213,12 +231,56 @@
             <select id="track-picker"><option value="">Choose a track</option></select>
             <div id="track-detail" class="track-selection meta">Select a marker to see its details.</div>
           </section>
+          <section class="panel" aria-labelledby="events-heading">
+            <h2 id="events-heading">Reported game events</h2>
+            <p id="events-empty" class="meta">No recent game events reported.</p>
+            <ul id="events" class="scroll-list"></ul>
+          </section>
+          </div>
+          <div id="view-operations" class="side-view" hidden>
+          <section class="panel" aria-labelledby="planner-heading">
+            <h2 id="planner-heading">AI Game Master status</h2>
+            <p id="planner-state" class="operation">Waiting for middleware status</p>
+            <dl class="kv">
+              <dt>Game calls in flight</dt><dd id="planner-inflight">—</dd>
+              <dt>Provider errors</dt><dd id="planner-errors">—</dd>
+              <dt>Commands issued</dt><dd id="planner-commands">—</dd>
+            </dl>
+          </section>
+          <section class="panel" aria-labelledby="plan-heading">
+            <h2 id="plan-heading">Current battle plan</h2>
+            <p id="plan-operation" class="operation" hidden></p>
+            <dl class="kv">
+              <dt>Phase</dt><dd id="plan-phase">—</dd>
+              <dt>Planner turn</dt><dd id="plan-turn">—</dd>
+            </dl>
+            <p id="plan-directive" class="wrap-text meta">No battle plan yet.</p>
+            <p class="meta">Recent planned actions, not confirmed execution.</p>
+            <ul id="plan-orders" class="scroll-list"></ul>
+          </section>
           <section class="panel" aria-labelledby="activity-heading">
             <h2 id="activity-heading">Game Master activity</h2>
             <p class="meta">Recent decisions and manual requests. This is not a delivery receipt.</p>
             <p id="activity-empty" class="meta">No activity reported yet.</p>
             <ul id="activity" class="scroll-list"></ul>
           </section>
+          </div>
+          <div id="view-chat" class="side-view" hidden>
+            <section class="panel" aria-labelledby="chat-heading">
+              <h2 id="chat-heading">Chat with the Game Master</h2>
+              <p class="meta">Ask about the match, decisions, or plans. Replies are advisory and cannot issue game orders.</p>
+              <ul id="chat-history" class="scroll-list" aria-label="Chat transcript"></ul>
+              <form id="chat-form" class="stack">
+                <label for="chat-input">Ask the Game Master</label>
+                <textarea id="chat-input" maxlength="1000" rows="3" placeholder="What is the current objective, and what is the AI planning next?" required></textarea>
+                <div class="actions">
+                  <button id="chat-send" type="submit" class="primary">Send</button>
+                  <button id="chat-clear" type="button">Clear chat</button>
+                </div>
+              </form>
+              <p id="chat-status" class="status" role="status"></p>
+            </section>
+          </div>
           <details id="quick-panel" class="panel">
             <summary><strong>Admin commands</strong></summary>
             <div class="command-box">

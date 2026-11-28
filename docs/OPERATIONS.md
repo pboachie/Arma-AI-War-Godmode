@@ -35,6 +35,12 @@ players or AI tracks the addon reports, not every NPC or vehicle in the world.
 Objectives and Side Operations appear beside the map as reported by the game.
 The current bridge does not supply positions for every objective.
 
+Switch to **AI operations** to see planner phase, turn, planned actions and
+recent Game Master decisions. **Chat** asks the configured model for an
+advisory explanation based on a bounded current briefing. It uses the same
+provider limits as game decisions and does not insert orders into the match.
+Questions and replies stay in the tab rather than becoming a game transcript.
+
 The page checks for new reports every 10 seconds. Positions change on SITREPs,
 not every game frame. After 75 seconds without a recent report, the dashboard
 labels positions stale. A failed read marks them unavailable, and the last

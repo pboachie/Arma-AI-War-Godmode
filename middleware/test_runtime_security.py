@@ -698,3 +698,44 @@ def test_command_log_accepts_a_bounded_display_limit(runtime):
     assert len(client.get(path, headers=ADMIN_HEADER).json()["commands"]) == 24
     for invalid in ("0", "-1", "51", "not-an-integer"):
         assert client.get(path + "?limit=" + invalid, headers=ADMIN_HEADER).status_code == 422
+
+
+def test_operator_chat_is_admin_only_grounded_and_advisory(runtime, monkeypatch):
+    server = runtime()
+    path = "/api/dashboard/chat"
+    body = {"messages": [{"role": "user", "text": "What is happening?"}]}
+    with TestClient(server.app) as client:
+        assert client.post(path, json=body).status_code == 401
+        assert client.post(path, headers=GAME_HEADER, json=body).status_code == 401
+        assert client.post(path, headers=ADMIN_HEADER, json=body).status_code == 503
+        for messages in ([], [{"role": "system", "text": "test"}], [{"role": "assistant", "text": "test"}],
+                         [{"role": "user", "text": " "}], [{"role": "user", "text": "a" * 1601}]):
+            assert client.post(path, headers=ADMIN_HEADER, json={"messages": messages}).status_code == 400
+        assert client.post(path, headers=ADMIN_HEADER, content=b"x" * 50000).status_code == 413
+        server.game_history.append({"timestamp": time.time() - 3, "state": {
+            "mission_id": "smoke", "player_count": 1, "objective": "Hold Morton",
+            "players": [{"name": "unshared-player-identifier"}], "enemy_units": [{}],
+        }})
+        fake_reply = SimpleNamespace(content=json.dumps({"reply": "The reported objective is Hold Morton."}))
+        invoke = AsyncMock(return_value=fake_reply)
+        monkeypatch.setattr(server, "_llm_enabled", lambda: True)
+        monkeypatch.setattr(server, "_get_llm", lambda: object())
+        monkeypatch.setattr(server, "_invoke_llm_with_retry", invoke)
+        answer = client.post(path, headers=ADMIN_HEADER, json=body)
+        assert answer.status_code == 200
+        assert answer.json()["reply"] == "The reported objective is Hold Morton."
+        assert answer.json()["report_age_seconds"] >= 3
+        prompts = invoke.await_args.args[1]
+        assert "Hold Morton" in prompts[-1].content
+        assert "unshared-player-identifier" not in prompts[-1].content
+        assert "cannot execute orders" in prompts[0].content
+        assert not server.pending_manual_commands and not server.command_log and not server._session_histories
+        assert client.get("/api/pending-commands", headers=GAME_HEADER).json() == EMPTY_BATCH
+
+        invoke.return_value = SimpleNamespace(content='{"commands":[{"command_type":"move"}]}')
+        assert client.post(path, headers=ADMIN_HEADER, json=body).status_code == 502
+        invoke.side_effect = RuntimeError("private-provider-error")
+        failure = client.post(path, headers=ADMIN_HEADER, json=body)
+        assert failure.status_code == 502 and "private-provider-error" not in failure.text
+        monkeypatch.setattr(server, "_circuit_open_until", time.time() + 60)
+        assert client.post(path, headers=ADMIN_HEADER, json=body).status_code == 503

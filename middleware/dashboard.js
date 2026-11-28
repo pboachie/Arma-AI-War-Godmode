@@ -115,14 +115,16 @@
   });
   const activityPath = "/api/command-log?limit=12";
   const terrainPath = "/api/dashboard/maps/everon";
+  const chatPath = "/api/dashboard/chat";
   const readPaths = new Set([...Object.values(routes), activityPath, terrainPath]);
   const manualPath = "/api/manual-command";
-  const writePaths = new Set([manualPath, "/api/reset"]);
+  const writePaths = new Set([manualPath, "/api/reset", chatPath]);
   const base = new URL(".", location.href);
   const svg = byId("battle-map");
   const terrain = byId("terrain");
   const defaultTerrain = document.querySelector("main").dataset.terrain === "everon" ? "everon" : "";
   const layerInputs = [...document.querySelectorAll("[data-layer]")];
+  const sideButtons = [...document.querySelectorAll("[data-side-view]")];
   const svgNode = (tag, attributes = {}) => {
     const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
     for (const [k, v] of Object.entries(attributes)) node.setAttribute(k, String(v));
@@ -137,6 +139,7 @@
 
   let session, timer, debugSerial = 0, terrainSerial = 0;
   let snapshot, receipt, gameUnavailable, tracks = [], selection = "", imageUrl, drag;
+  let transcript = [];
   let camera = {x: WORLD / 2, y: WORLD / 2, span: WORLD};
   let view = {x: 0, y: 0, width: WORLD, height: WORLD, metersPerPixel: 20};
   let drawFrame;
@@ -157,13 +160,19 @@
     const response = await fetch(url, {
       method, headers, body, mode: "same-origin", redirect: "error", cache: "no-store",
       credentials: "omit", referrerPolicy: "no-referrer",
-      signal: AbortSignal.any([active.abort.signal, AbortSignal.timeout(path === terrainPath ? 18000 : 8000)]),
+      signal: AbortSignal.any([active.abort.signal, AbortSignal.timeout(path === chatPath ? 60000 : path === terrainPath ? 18000 : 8000)]),
     });
     if (response.status === 401 && active === session) {
       lock("The admin key was rejected. Enter a valid admin key to continue.", true);
       throw new Error("Admin key rejected");
     }
-    if (!response.ok) throw new Error("Request returned HTTP " + response.status + ".");
+    if (!response.ok) {
+      if (path === chatPath) {
+        const problem = await response.json().catch(() => null);
+        if (clean(problem?.detail)) throw new Error(clean(problem.detail));
+      }
+      throw new Error("Request returned HTTP " + response.status + ".");
+    }
     return path === terrainPath ? response.blob() : response.json();
   }
 
@@ -206,6 +215,7 @@
     snapshot = undefined;
     gameUnavailable = false;
     tracks = [];
+    transcript = [];
     selection = "";
     drag = undefined;
     svg.dataset.drag = "false";
@@ -213,13 +223,18 @@
     byId("console").hidden = true;
     byId("unlock-panel").hidden = false;
     for (const id of ["quick-panel", "diagnostics"]) byId(id).open = false;
-    for (const id of ["admin-key", "batch", "broadcast", "game-clock"]) byId(id).value = "";
+    for (const id of ["admin-key", "batch", "broadcast", "game-clock", "chat-input"]) byId(id).value = "";
     for (const id of ["unlock", "queue", "reset", "send-broadcast", "send-clock", "refresh"]) byId(id).disabled = false;
+    byId("chat-input").disabled = false;
     for (const id of ["quick-status", "operator-status"]) showStatus("", false, id);
     byId("detail").textContent = "No data yet.";
     byId("model").textContent = "—";
     byId("activity").replaceChildren();
     byId("activity-empty").hidden = false;
+    showStatus("", false, "chat-status");
+    renderChat();
+    renderPlanner();
+    showSideView("situation");
     terrain.value = defaultTerrain;
     for (const input of layerInputs) input.checked = input.defaultChecked;
     fit();
@@ -412,6 +427,7 @@
     selection = track?.key || "";
     byId("track-picker").value = selection;
     if (center && track) camera = {x: track.x, y: track.y, span: Math.min(camera.span, 2600)};
+    if (track) showSideView("situation");
     showSelection();
     scheduleDraw();
   }
@@ -444,6 +460,12 @@
       : [clean(route?.pickup_name), clean(route?.delivery_name)].filter(Boolean).join(" → ");
     operation.textContent = [label(active?.kind), label(active?.status), journey].filter(Boolean).join(" · ");
     operation.hidden = !operation.textContent;
+    const events = array(state?.recent_events).slice(-10).reverse().map(event => {
+      if (typeof event === "string") return clean(event);
+      return [label(event?.type), clean(event?.name), clean(event?.location)].filter(Boolean).join(" · ");
+    }).filter(Boolean);
+    byId("events").replaceChildren(...events.map(event => node("li", event)));
+    byId("events-empty").hidden = Boolean(events.length);
     renderFreshness();
     renderTrackPicker();
     scheduleDraw();
@@ -466,6 +488,58 @@
     byId("activity-empty").textContent = unavailable ? "Activity feed unavailable." : "No activity reported yet.";
   }
 
+  function showSideView(name) {
+    for (const button of sideButtons) {
+      const selected = button.dataset.sideView === name;
+      button.setAttribute("aria-pressed", String(selected));
+      byId("view-" + button.dataset.sideView).hidden = !selected;
+    }
+  }
+
+  function renderPlanner(health, plan, planUnavailable = false) {
+    const planner = byId("planner-state");
+    if (!health) planner.textContent = "Middleware status unavailable";
+    else if (health.llm_provider === "disabled") planner.textContent = "Model disabled";
+    else if (health.circuit_breaker_open) planner.textContent = "Provider temporarily unavailable";
+    else if (health.game_master_processing || health.inflight_calls > 0) planner.textContent = "Processing a game decision";
+    else if (health.operator_chat_busy) planner.textContent = "Answering an admin question";
+    else planner.textContent = snapshot?.state?.player_count === 0 ? "Waiting for players" : "Waiting for the next relevant report";
+    byId("planner-inflight").textContent = health?.inflight_calls ?? "—";
+    byId("planner-errors").textContent = health?.total_errors ?? "—";
+    byId("planner-commands").textContent = health?.total_commands_issued ?? "—";
+    const operation = plan?.operation;
+    const name = operation?.started ? clean(operation.operation_name) : "";
+    byId("plan-operation").textContent = name;
+    byId("plan-operation").hidden = !name;
+    byId("plan-phase").textContent = label(name ? operation.current_phase : plan?.phase) || "—";
+    byId("plan-turn").textContent = plan?.turn ?? "—";
+    byId("plan-directive").textContent = planUnavailable ? "Battle plan unavailable."
+      : clean(name ? operation.phase_directive : plan?.briefing, 600) || "No battle plan yet.";
+    const orders = array(plan?.active_operations).slice(-6).reverse().map(item =>
+      [label(item?.type), clean(item?.unit), clean(item?.target)].filter(Boolean).join(" · ")
+    ).filter(Boolean);
+    byId("plan-orders").replaceChildren(...orders.map(order => node("li", order)));
+  }
+
+  function renderChat() {
+    const history = byId("chat-history");
+    history.replaceChildren(...transcript.map(message => {
+      const row = node("li");
+      row.dataset.role = message.role;
+      row.append(node("p", message.role === "user" ? "You" : "Game Master", "tag meta"),
+        node("p", message.text, "wrap-text"));
+      if (message.role === "assistant") {
+        row.append(node("p", Number.isFinite(message.age)
+          ? "Match report was " + Math.round(message.age) + "s old when asked."
+          : "No match report was available when asked.", "meta"));
+      }
+      return row;
+    }));
+    history.scrollTop = history.scrollHeight;
+    byId("chat-send").disabled = Boolean(session?.chatting);
+    byId("chat-clear").disabled = Boolean(session?.chatting) || transcript.length === 0;
+  }
+
   async function refreshDebug() {
     const active = session;
     if (!active?.unlocked || !byId("diagnostics").open) return;
@@ -486,8 +560,8 @@
     active.refreshing = true;
     byId("refresh").disabled = true;
     try {
-      const [health, game, activity] = await Promise.allSettled([
-        request(active, routes.health), request(active, routes.game), request(active, activityPath),
+      const [health, game, activity, plan] = await Promise.allSettled([
+        request(active, routes.health), request(active, routes.game), request(active, activityPath), request(active, routes.plan),
       ]);
       if (active !== session) return;
       gameUnavailable = game.status !== "fulfilled";
@@ -498,6 +572,7 @@
       byId("model").textContent = clean(health.value?.model) || clean(health.value?.llm_provider) || "—";
       renderState();
       renderActivity(activity.value, activity.status !== "fulfilled");
+      renderPlanner(health.value, plan.value, plan.status !== "fulfilled");
       void refreshDebug();
       if (health.status !== "fulfilled") showStatus("Unable to refresh middleware health.", true);
       else showStatus("Last poll " + new Date().toLocaleTimeString());
@@ -565,6 +640,45 @@
     if (!match) return showStatus("Enter a valid in-game time.", true, "quick-status");
     return queue({commands: [], time_override: Number(match[1]) + Number(match[2]) / 60},
       byId("send-clock"), "quick-status", "Time change queued for the game.");
+  });
+  for (const button of sideButtons) {
+    button.addEventListener("click", () => showSideView(button.dataset.sideView));
+  }
+  byId("chat-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const active = session;
+    if (!active?.unlocked || active.chatting) return;
+    const field = byId("chat-input");
+    const question = clean(field.value, 1000);
+    if (!question) return showStatus("Enter a question.", true, "chat-status");
+    active.chatting = true;
+    field.disabled = true;
+    renderChat();
+    showStatus("Waiting for the Game Master…", false, "chat-status");
+    try {
+      const messages = transcript.slice(-4).map(item => ({role: item.role, text: item.text.slice(0, 1600)}));
+      messages.push({role: "user", text: question});
+      const answer = await request(active, chatPath, "POST", JSON.stringify({messages}));
+      if (active !== session) return;
+      transcript = [...transcript.slice(-22), messages.at(-1),
+        {role: "assistant", text: clean(answer.reply, 3000), age: answer.report_age_seconds}];
+      field.value = "";
+      showStatus("", false, "chat-status");
+    } catch (error) {
+      if (active === session) showStatus(error.message, true, "chat-status");
+    } finally {
+      active.chatting = false;
+      if (active === session) {
+        field.disabled = false;
+        renderChat();
+      }
+    }
+  });
+  byId("chat-clear").addEventListener("click", () => {
+    if (session?.chatting) return;
+    transcript = [];
+    showStatus("", false, "chat-status");
+    renderChat();
   });
   byId("command-form").addEventListener("submit", event => {
     event.preventDefault();

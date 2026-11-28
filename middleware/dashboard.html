@@ -3,64 +3,140 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>God Mode · Arma Reforger</title>
+  <title>AI War · Tactical Dashboard</title>
   <style nonce="GODMODE_CSP_NONCE">
     :root {
-      color-scheme: dark; --bg: #101512; --panel: #19211c; --line: #365044;
-      --ink: #edf5ef; --muted: #aec5b5; --accent: #91edb3; --error: #ffbda9;
-      font: 16px/1.5 system-ui, sans-serif;
+      color-scheme: dark;
+      --bg: #101611; --surface: #18211a; --raised: #202c23; --border: #33473a;
+      --text: #eef4eb; --muted: #adc0af; --green: #a3efbf; --amber: #ffd484;
+      --player: #78e5ff; --friendly: #8df4ad; --enemy: #ff8c88; --vehicle: #ffcb79; --site: #ddc2fd;
+      font: 15px/1.45 system-ui, sans-serif;
     }
-    *, *::before, *::after { box-sizing: border-box; }
+    * { box-sizing: border-box; }
     [hidden] { display: none !important; }
-    body { margin: 0; background: var(--bg); color: var(--ink); }
-    .wrap { width: min(72rem, 100% - 2rem); margin: 0 auto; }
-    header { padding: 2.2rem 0 1.5rem; border-bottom: 1px solid var(--line); }
-    .eyebrow { color: var(--accent); text-transform: uppercase; letter-spacing: .12em; font-size: .8rem; font-weight: 700; }
+    body { margin: 0; background: var(--bg); color: var(--text); }
+    .wrap { max-width: 1580px; margin: auto; padding: 0 clamp(12px, 2.3vw, 36px); }
+    header.mast { border-bottom: 1px solid var(--border); background: #141d16; }
+    header .wrap { padding-top: 18px; padding-bottom: 17px; }
+    .eyebrow { color: var(--green); font-size: .74rem; font-weight: 750; text-transform: uppercase; letter-spacing: .14em; }
     h1, h2, h3, p { margin: 0; }
-    h1 { font-size: clamp(1.85rem, 6vw, 3rem); line-height: 1.2; margin: .3rem 0; }
-    h2 { font-size: 1.35rem; }
-    h3 { font-size: 1rem; }
-    p { color: var(--muted); }
-    main { padding: 1.5rem 0 3rem; }
-    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: .7rem; padding: 1rem; margin-bottom: 1rem; }
-    #unlock-panel { max-width: 34rem; }
-    .stack { display: grid; gap: .7rem; }
-    .bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .6rem 1rem; margin-bottom: 1rem; }
-    .actions { display: flex; flex-wrap: wrap; gap: .55rem; }
-    .status { min-height: 1.5rem; margin-bottom: .65rem; }
-    .status[data-error="true"] { color: var(--error); }
-    input, select, button, textarea { font: inherit; color: inherit; border: 1px solid var(--line); border-radius: .35rem; background: var(--bg); padding: .5rem .7rem; }
-    input, textarea { width: 100%; }
-    select { max-width: 100%; }
-    button { cursor: pointer; }
-    button:disabled { opacity: .55; cursor: wait; }
-    button:hover:not(:disabled) { border-color: var(--accent); }
-    :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-    .primary { background: var(--accent); color: #102119; border-color: var(--accent); font-weight: 700; }
-    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr)); gap: .65rem; margin-bottom: 1rem; }
-    .cards div { border: 1px solid var(--line); border-radius: .45rem; padding: .7rem; overflow-wrap: anywhere; }
-    dt { color: var(--muted); font-size: .85rem; }
-    dd { margin: .2rem 0 0; font-size: 1.1rem; }
-    pre, textarea { font-family: ui-monospace, monospace; font-size: .88rem; }
-    pre { margin: 0; padding: .8rem; background: var(--bg); border-radius: .3rem; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 30rem; overflow: auto; }
-    textarea { resize: vertical; min-height: 7rem; }
-    summary { cursor: pointer; font-weight: 700; }
-    details[open] summary { margin-bottom: .7rem; }
+    h1 { font-size: clamp(1.55rem, 3vw, 2.1rem); line-height: 1.17; margin-top: 4px; letter-spacing: -.025em; }
+    h2 { font-size: 1.08rem; }
+    h3 { font-size: .96rem; }
+    .subtle, .meta { color: var(--muted); }
+    .meta { font-size: .81rem; }
+    .tabular { font-variant-numeric: tabular-nums; }
+    main.wrap { padding-bottom: 28px; }
+    .bar, .actions, .map-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .bar { justify-content: space-between; }
+    .status { min-height: 1.3em; margin: 7px 0; color: var(--muted); font-size: .84rem; }
+    .status[data-error="true"] { color: var(--enemy); }
+    .pill { display: inline-flex; padding: 3px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: .78rem; font-weight: 650; white-space: nowrap; }
+    .pill[data-state="live"] { background: #273f31; border-color: #497059; color: var(--green); }
+    .pill[data-state="stale"], .pill[data-state="offline"] { background: #453626; border-color: #765e3a; color: var(--amber); }
+    .pill[data-state="waiting"] { color: var(--muted); }
+    input, select, textarea, button { font: inherit; color: inherit; background: #121a14; border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; }
+    input, textarea, select { max-width: 100%; }
+    button { font-size: .86rem; font-weight: 620; cursor: pointer; }
+    button:hover:not(:disabled) { background: var(--raised); }
+    button:disabled { opacity: .55; cursor: default; }
+    button.primary { background: var(--green); border-color: var(--green); color: #132619; }
+    button.primary:hover:not(:disabled) { background: #c2f8d6; }
+    summary { cursor: pointer; }
+    :focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+    #unlock-panel { margin: 34px auto; width: min(100%, 460px); }
+    .stack { display: grid; gap: 8px; }
+    .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 9px; padding: 13px; min-width: 0; }
+    .cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin: 8px 0 12px; }
+    .cards > div { padding: 7px 11px; min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 7px; }
+    .cards dt { font-size: .76rem; color: var(--muted); }
+    .cards dd { margin: 2px 0 0; font-size: .98rem; font-weight: 680; overflow-wrap: anywhere; }
+    .tactical-layout { display: grid; grid-template-columns: minmax(0, 2.6fr) minmax(270px, 1fr); gap: 12px; align-items: start; }
+    .map-panel { padding: 0; overflow: hidden; }
+    .map-header, .map-footer { padding: 9px 11px; }
+    .map-header { border-bottom: 1px solid var(--border); }
+    .map-header select { font-size: .84rem; padding: 5px 6px; }
+    .layer-list { border: 0; margin: 8px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 5px 11px; }
+    .layer-list label { display: flex; align-items: center; gap: 4px; font-size: .81rem; white-space: nowrap; }
+    .layer-list input { accent-color: var(--green); margin: 0 2px 0 0; }
+    .swatch { width: 9px; height: 9px; background: var(--color); display: inline-block; }
+    .swatch.player { border-radius: 50%; }
+    .swatch.friendly { rotate: 45deg; }
+    .swatch.enemy { clip-path: polygon(50% 0, 100% 100%, 0% 100%); }
+    .swatch.site { border-radius: 50%; background: none; border: 2px solid var(--color); }
+    .player { --color: var(--player); } .friendly { --color: var(--friendly); } .enemy { --color: var(--enemy); }
+    .vehicle { --color: var(--vehicle); } .site { --color: var(--site); }
+    .map-window { position: relative; min-height: 360px; height: clamp(430px, 64vh, 860px); background: #111a1e; }
+    #battle-map { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+    #battle-map[data-drag="true"] { cursor: grabbing; }
+    #marker-layer[data-stale="true"] { opacity: .53; }
+    .map-pin { cursor: pointer; }
+    .map-pin .symbol { fill: var(--color); stroke: #13201a; stroke-width: 2; vector-effect: non-scaling-stroke; }
+    .map-pin.site .symbol { fill: #18211a; stroke: var(--color); }
+    .map-pin .halo { fill: transparent; stroke: transparent; stroke-width: 2; vector-effect: non-scaling-stroke; }
+    .map-pin[data-selected="true"] .halo, .map-pin:focus-visible .halo { stroke: white; }
+    .terrain-grid { stroke: #cfedcf; stroke-opacity: .25; stroke-width: 1; vector-effect: non-scaling-stroke; }
+    .place-name { fill: #eef4de; stroke: #121912; stroke-width: 3; vector-effect: non-scaling-stroke; paint-order: stroke; stroke-linejoin: round; font-weight: 630; text-anchor: middle; }
+    .map-corner { position: absolute; left: 11px; top: 10px; display: grid; gap: 5px; justify-items: start; pointer-events: none; }
+    .map-corner button { pointer-events: auto; padding: 4px 10px; min-width: 34px; background: #121a14; }
+    .north { padding: 3px 9px; font-weight: 760; border-radius: 4px; background: #18231e; font-size: .79rem; }
+    .map-overlay { pointer-events: none; position: absolute; inset: 0; display: grid; place-items: center; padding: 35px; text-align: center; }
+    .map-overlay p { padding: 9px 13px; border: 1px solid var(--border); border-radius: 6px; background: #111a14; color: var(--text); }
+    .map-footer { border-top: 1px solid var(--border); font-size: .78rem; }
+    .map-footer a { color: inherit; }
+    .sidebar { display: grid; gap: 10px; }
+    .sidebar h2 { margin-bottom: 6px; }
+    .view-nav { display: flex; gap: 5px; padding: 5px; }
+    .view-nav button { flex: 1; padding: 5px; }
+    .view-nav button[aria-pressed="true"] { border-color: var(--green); color: var(--green); background: #263a2a; }
+    .side-view { display: grid; gap: 10px; min-width: 0; }
+    .kv { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 3px 9px; margin: 0 0 7px; font-size: .84rem; }
+    .kv dt { color: var(--muted); }
+    .kv dd { margin: 0; overflow-wrap: anywhere; }
+    .wrap-text { overflow-wrap: anywhere; white-space: pre-wrap; }
+    #chat-history { max-height: min(48vh, 430px); margin: 7px 0; }
+    #chat-history li { background: #152018; padding: 7px 9px 8px; border: 1px solid var(--border); border-radius: 6px; }
+    #chat-history li[data-role="user"] { background: var(--raised); }
+    #chat-input { min-height: 72px; }
+    .scroll-list { list-style: none; display: grid; gap: 7px; margin: 0; padding: 0; max-height: 288px; overflow: auto; }
+    .scroll-list li { border-top: 1px solid var(--border); padding: 6px 2px 1px; }
+    .scroll-list li:first-child { border-top: 0; padding-top: 0; }
+    .scroll-list li p { overflow-wrap: anywhere; }
+    #track-picker { display: block; width: 100%; margin-top: 3px; }
+    .track-selection { margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--border); overflow-wrap: anywhere; max-height: 148px; overflow: auto; }
+    .operation { color: var(--amber); font-size: .89rem; margin-bottom: 6px; overflow-wrap: anywhere; }
+    .tag { color: var(--green); font-weight: 650; }
+    .command-box { display: grid; gap: 9px; margin-top: 8px; }
+    .command-box input { min-width: 0; width: 100%; }
+    .diagnostics { margin-top: 12px; }
+    .diagnostics > div { margin-top: 10px; }
+    textarea { width: 100%; min-height: 105px; }
+    pre { margin: 8px 0 0; padding: 11px; overflow: auto; max-height: 48vh; background: #111813; border: 1px solid var(--border); border-radius: 6px; }
+    .danger { color: var(--enemy); }
+    @media (max-width: 900px) {
+      .tactical-layout { grid-template-columns: 1fr; }
+      .sidebar { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+    }
+    @media (max-width: 540px) {
+      .sidebar { grid-template-columns: 1fr; }
+      .cards { grid-template-columns: repeat(2, 1fr); }
+      .map-window { min-height: 335px; height: 52vh; }
+    }
   </style>
 </head>
 <body>
-  <header>
+  <header class="mast">
     <div class="wrap">
-      <div class="eyebrow">Arma Reforger</div>
-      <h1>God Mode</h1>
-      <p>Middleware operation and game telemetry</p>
+      <div class="eyebrow">AI War · Admin Console</div>
+      <h1>Tactical dashboard</h1>
+      <p class="subtle">Arma Reforger · Game Master operations</p>
     </div>
   </header>
-  <main class="wrap">
-    <p id="status" class="status" role="status" aria-live="polite"></p>
+  <main class="wrap" data-terrain="GODMODE_DASHBOARD_MAP">
+    <p id="status" class="status" role="status"></p>
     <section id="unlock-panel" class="panel stack">
       <h2>Unlock dashboard</h2>
-      <p>Use the admin API key. It is kept only in this tab’s memory until you lock or reload the page.</p>
+      <p class="subtle">Enter the admin API key. It stays in this tab’s memory until you lock or reload.</p>
       <form id="unlock-form" class="stack" autocomplete="off">
         <label for="admin-key">Admin API key</label>
         <input id="admin-key" type="password" required minlength="32" maxlength="128" autocomplete="off" spellcheck="false" autocapitalize="off">
@@ -71,224 +147,198 @@
 
     <div id="console" hidden>
       <div class="bar">
-        <h2>Overview</h2>
+        <div class="actions">
+          <span id="freshness" class="pill" data-state="waiting">Waiting for game report</span>
+          <span id="freshness-age" class="meta tabular"></span>
+        </div>
         <div class="actions">
           <button id="refresh" type="button">Refresh</button>
-          <button id="lock" type="button">Lock</button>
+          <button id="lock" type="button">Lock dashboard</button>
         </div>
       </div>
-      <dl class="cards">
-        <div><dt>LLM provider</dt><dd id="provider">—</dd></div>
-        <div><dt>Model</dt><dd id="model">—</dd></div>
-        <div><dt>SITREPs</dt><dd id="sitreps">—</dd></div>
-        <div><dt>Players</dt><dd id="players">—</dd></div>
+      <dl class="cards tabular">
+        <div><dt>Players connected</dt><dd id="players">—</dd></div>
+        <div><dt>Friendly AI reported</dt><dd id="friendly-ai">—</dd></div>
+        <div><dt>Enemy AI reported</dt><dd id="enemy-ai">—</dd></div>
+        <div><dt>Weather · game time</dt><dd id="conditions">—</dd></div>
+        <div><dt>AI model</dt><dd id="model">—</dd></div>
       </dl>
-      <section class="panel">
-        <div class="bar">
-          <h3><label for="view">Inspect</label></h3>
-          <select id="view">
-            <option value="game">Latest game state</option>
-            <option value="commands">Game command log</option>
-            <option value="tactical">Tactical telemetry</option>
-            <option value="plan">Battle plan</option>
-            <option value="campaign">Campaign</option>
-            <option value="health">Middleware health</option>
-            <option value="stats">Middleware statistics</option>
-            <option value="metrics">Middleware metrics</option>
-            <option value="server">Game server status</option>
-            <option value="serverMetrics">Host metrics</option>
-            <option value="rcon">RCON status</option>
-            <option value="behavior">Behavior settings</option>
-            <option value="logs">Game server logs (when enabled)</option>
-            <option value="agents">Agents</option>
-            <option value="replays">Replay files</option>
-            <option value="reports">Battle reports</option>
-          </select>
-        </div>
-        <pre id="detail" tabindex="0">No data yet.</pre>
-      </section>
-      <details id="operator" class="panel">
-        <summary>Operator controls</summary>
-        <form id="command-form" class="stack">
-          <label for="batch">Manual game command batch (JSON)</label>
-          <textarea id="batch" maxlength="65536" required spellcheck="false" placeholder='{"commands": []}'></textarea>
-          <div class="actions">
-            <button id="queue" type="submit" class="primary">Queue batch</button>
-            <button id="reset" type="button">Reset session data</button>
+      <div class="tactical-layout">
+        <section class="panel map-panel" aria-labelledby="map-heading">
+          <div class="map-header">
+            <div class="bar">
+              <div>
+                <h2 id="map-heading">Battlefield map</h2>
+                <p class="meta">North up · Enfusion world grid, 1 km lines</p>
+              </div>
+              <div class="map-controls">
+                <label class="meta" for="terrain">Terrain</label>
+                <select id="terrain">
+                  <option value="">Select terrain</option>
+                  <option value="everon">Everon · satellite</option>
+                </select>
+                <button id="focus" type="button" disabled>Focus players</button>
+              </div>
+            </div>
+            <fieldset class="layer-list" aria-label="Map layers">
+              <label><input type="checkbox" data-layer="player" checked><span class="swatch player"></span>Players</label>
+              <label><input type="checkbox" data-layer="friendly" checked><span class="swatch friendly"></span>Friendly AI</label>
+              <label><input type="checkbox" data-layer="enemy" checked><span class="swatch enemy"></span>Enemy AI</label>
+              <label><input type="checkbox" data-layer="vehicle" checked><span class="swatch vehicle"></span>Vehicles</label>
+              <label><input type="checkbox" data-layer="site"><span class="swatch site"></span>Sites</label>
+            </fieldset>
           </div>
-        </form>
-        <p id="operator-status" class="status" role="status"></p>
+          <div class="map-window">
+            <svg id="battle-map" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12800 12800" tabindex="0"
+                 aria-label="Tactical map. Use arrow keys to pan, plus and minus to zoom, and Home for the whole island.">
+              <image id="basemap" width="12800" height="12800" preserveAspectRatio="none"></image>
+              <g id="grid-layer" pointer-events="none" aria-hidden="true"></g>
+              <g id="place-layer" pointer-events="none" aria-hidden="true"></g>
+              <g id="marker-layer"></g>
+            </svg>
+            <div id="map-overlay" class="map-overlay"><p id="map-message">Select Everon if this server is running that terrain.</p></div>
+            <div class="map-corner">
+              <span class="north" aria-hidden="true">↑ N</span>
+              <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+              <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+              <button id="fit" type="button" aria-label="Fit the whole island">Fit</button>
+            </div>
+          </div>
+          <div class="map-footer bar">
+            <span id="map-position" class="meta tabular">East and north in meters</span>
+            <span class="meta">Imagery <a href="https://reforgercommandcenter.com/" target="_blank" rel="noopener noreferrer">RCC</a> ·
+              <a href="https://reforger.recoil.org/everon/" target="_blank" rel="noopener noreferrer">Bewilderbeest</a> ·
+              <a href="https://www.bohemia.net/en/licenses/arma-public-license-share-alike" target="_blank" rel="noopener noreferrer">APL-SA</a>
+            </span>
+          </div>
+        </section>
+        <aside class="sidebar" aria-label="Operations and operator tools">
+          <nav class="panel view-nav" aria-label="Dashboard views">
+            <button type="button" data-side-view="situation" aria-controls="view-situation" aria-pressed="true">Situation</button>
+            <button type="button" data-side-view="operations" aria-controls="view-operations" aria-pressed="false">AI operations</button>
+            <button type="button" data-side-view="chat" aria-controls="view-chat" aria-pressed="false">Chat</button>
+          </nav>
+          <div id="view-situation" class="side-view">
+          <section class="panel" aria-labelledby="mission-heading">
+            <h2 id="mission-heading">Objectives</h2>
+            <p id="side-operation" class="operation" hidden></p>
+            <p id="objective-empty" class="meta">No objectives reported yet.</p>
+            <ul id="objectives" class="scroll-list"></ul>
+          </section>
+          <section class="panel" aria-labelledby="track-heading">
+            <div class="bar"><h2 id="track-heading">Map tracks</h2><span id="track-count" class="meta tabular"></span></div>
+            <label for="track-picker" class="meta">Select a reported unit or site</label>
+            <select id="track-picker"><option value="">Choose a track</option></select>
+            <div id="track-detail" class="track-selection meta">Select a marker to see its details.</div>
+          </section>
+          <section class="panel" aria-labelledby="events-heading">
+            <h2 id="events-heading">Reported game events</h2>
+            <p id="events-empty" class="meta">No recent game events reported.</p>
+            <ul id="events" class="scroll-list"></ul>
+          </section>
+          </div>
+          <div id="view-operations" class="side-view" hidden>
+          <section class="panel" aria-labelledby="planner-heading">
+            <h2 id="planner-heading">AI Game Master status</h2>
+            <p id="planner-state" class="operation">Waiting for middleware status</p>
+            <dl class="kv">
+              <dt>Game calls in flight</dt><dd id="planner-inflight">—</dd>
+              <dt>Provider errors</dt><dd id="planner-errors">—</dd>
+              <dt>Commands issued</dt><dd id="planner-commands">—</dd>
+            </dl>
+          </section>
+          <section class="panel" aria-labelledby="plan-heading">
+            <h2 id="plan-heading">Current battle plan</h2>
+            <p id="plan-operation" class="operation" hidden></p>
+            <dl class="kv">
+              <dt>Phase</dt><dd id="plan-phase">—</dd>
+              <dt>Planner turn</dt><dd id="plan-turn">—</dd>
+            </dl>
+            <p id="plan-directive" class="wrap-text meta">No battle plan yet.</p>
+            <p class="meta">Recent planned actions, not confirmed execution.</p>
+            <ul id="plan-orders" class="scroll-list"></ul>
+          </section>
+          <section class="panel" aria-labelledby="activity-heading">
+            <h2 id="activity-heading">Game Master activity</h2>
+            <p class="meta">Recent decisions and manual requests. This is not a delivery receipt.</p>
+            <p id="activity-empty" class="meta">No activity reported yet.</p>
+            <ul id="activity" class="scroll-list"></ul>
+          </section>
+          </div>
+          <div id="view-chat" class="side-view" hidden>
+            <section class="panel" aria-labelledby="chat-heading">
+              <h2 id="chat-heading">Chat with the Game Master</h2>
+              <p class="meta">Ask about the match, decisions, or plans. Replies are advisory and cannot issue game orders.</p>
+              <ul id="chat-history" class="scroll-list" aria-label="Chat transcript"></ul>
+              <form id="chat-form" class="stack">
+                <label for="chat-input">Ask the Game Master</label>
+                <textarea id="chat-input" maxlength="1000" rows="3" placeholder="What is the current objective, and what is the AI planning next?" required></textarea>
+                <div class="actions">
+                  <button id="chat-send" type="submit" class="primary">Send</button>
+                  <button id="chat-clear" type="button">Clear chat</button>
+                </div>
+              </form>
+              <p id="chat-status" class="status" role="status"></p>
+            </section>
+          </div>
+          <details id="quick-panel" class="panel">
+            <summary><strong>Admin commands</strong></summary>
+            <div class="command-box">
+              <form id="broadcast-form" class="stack">
+                <label for="broadcast">Broadcast to players</label>
+                <input id="broadcast" type="text" maxlength="250" required>
+                <div><button id="send-broadcast" class="primary" type="submit">Queue broadcast</button></div>
+              </form>
+              <form id="clock-form" class="stack">
+                <label for="game-clock">Set in-game time</label>
+                <input id="game-clock" type="time" required>
+                <div><button id="send-clock" type="submit">Queue time change</button></div>
+              </form>
+              <p id="quick-status" class="status" role="status"></p>
+            </div>
+          </details>
+        </aside>
+      </div>
+      <details id="diagnostics" class="panel diagnostics">
+        <summary><strong>Diagnostics &amp; advanced commands</strong></summary>
+        <div class="stack">
+          <div class="bar">
+            <label for="view">Raw data</label>
+            <select id="view">
+              <option value="game">Latest game state</option>
+              <option value="commands">Game command log</option>
+              <option value="tactical">Tactical telemetry</option>
+              <option value="plan">Battle plan</option>
+              <option value="campaign">Campaign</option>
+              <option value="health">Middleware health</option>
+              <option value="stats">Middleware statistics</option>
+              <option value="metrics">Middleware metrics</option>
+              <option value="server">Game server status</option>
+              <option value="serverMetrics">Host metrics</option>
+              <option value="rcon">RCON status</option>
+              <option value="behavior">Behavior settings</option>
+              <option value="logs">Game server logs (when enabled)</option>
+              <option value="agents">Agents</option>
+              <option value="replays">Replay files</option>
+              <option value="reports">Battle reports</option>
+            </select>
+          </div>
+          <pre id="detail" tabindex="0">No data yet.</pre>
+          <form id="command-form" class="stack">
+            <label for="batch">Manual game command batch (JSON)</label>
+            <textarea id="batch" maxlength="65536" required spellcheck="false" placeholder='{"commands":[]}'></textarea>
+            <div class="actions">
+              <button id="queue" type="submit">Queue batch</button>
+              <button id="reset" class="danger" type="button">Reset session data</button>
+            </div>
+          </form>
+          <p id="operator-status" class="status" role="status"></p>
+        </div>
       </details>
     </div>
   </main>
   <script nonce="GODMODE_CSP_NONCE">
-    "use strict";
-    (() => {
-      const byId = id => document.getElementById(id);
-      const routes = Object.freeze({
-        game: "/api/game-state", commands: "/api/command-log", tactical: "/api/tactical-intel",
-        plan: "/api/battle-plan", campaign: "/api/campaign", health: "/api/health",
-        stats: "/stats", metrics: "/api/metrics", server: "/api/server/status",
-        serverMetrics: "/api/server/metrics", rcon: "/api/rcon/status",
-        behavior: "/api/behavior-config", logs: "/api/server/log?lines=100",
-        agents: "/api/agents", replays: "/api/replays", reports: "/api/battle-summaries",
-      });
-      const readPaths = new Set(Object.values(routes));
-      const writePaths = new Set(["/api/manual-command", "/api/reset"]);
-      const origin = window.location.origin;
-      let session;
-      let timer;
-      let unlocked = false;
-      let refreshId = 0;
-
-      function showStatus(message, error = false, target = "status") {
-        const element = byId(target);
-        element.textContent = message;
-        element.dataset.error = String(error);
-      }
-
-      function lock(message, error = false) {
-        if (session) {
-          session.abort.abort();
-          session.key = "";
-        }
-        session = undefined;
-        unlocked = false;
-        clearInterval(timer);
-        byId("unlock-panel").hidden = false;
-        byId("console").hidden = true;
-        byId("operator").open = false;
-        byId("admin-key").value = "";
-        byId("batch").value = "";
-        byId("unlock").disabled = false;
-        byId("queue").disabled = false;
-        byId("reset").disabled = false;
-        byId("detail").textContent = "No data yet.";
-        for (const id of ["provider", "model", "sitreps", "players"]) byId(id).textContent = "—";
-        showStatus("", false, "operator-status");
-        showStatus(message, error);
-      }
-
-      async function request(active, path, method = "GET", body) {
-        const allowed = method === "GET" ? readPaths : method === "POST" ? writePaths : null;
-        if (active !== session || !allowed?.has(path)) throw new Error("Request not permitted");
-        const url = new URL(path, origin);
-        if (url.origin !== origin || url.username || url.password) throw new Error("Invalid API destination");
-        const headers = { "X-API-Key": active.key, "Accept": "application/json" };
-        if (body !== undefined) headers["Content-Type"] = "application/json";
-        const response = await fetch(url, {
-          method, headers, body, mode: "same-origin", redirect: "error", cache: "no-store",
-          credentials: "omit", referrerPolicy: "no-referrer", signal: active.abort.signal,
-        });
-        if (response.status === 401 && active === session) {
-          lock("The admin key was rejected. Enter a valid admin key to continue.", true);
-          throw new Error("Admin key rejected");
-        }
-        if (!response.ok) throw new Error("Request returned HTTP " + response.status + ".");
-        return response.json();
-      }
-
-      async function refresh() {
-        const active = session;
-        if (!unlocked || !active) return;
-        const id = ++refreshId;
-        const view = byId("view").value;
-        const path = Object.hasOwn(routes, view) ? routes[view] : routes.game;
-        const health = request(active, routes.health);
-        const game = request(active, routes.game);
-        const detail = path === routes.game ? game : path === routes.health ? health : request(active, path);
-        const [healthResult, gameResult, detailResult] = await Promise.allSettled([health, game, detail]);
-        if (active !== session || id !== refreshId) return;
-        byId("provider").textContent = healthResult.value?.llm_provider ?? "Unavailable";
-        byId("model").textContent = healthResult.value?.model ?? "—";
-        byId("sitreps").textContent = healthResult.value?.total_requests ?? "—";
-        byId("players").textContent = gameResult.value?.state?.player_count ?? "—";
-        byId("detail").textContent = detailResult.status === "fulfilled"
-          ? JSON.stringify(detailResult.value, null, 2)
-          : detailResult.reason.message;
-        if (healthResult.status === "fulfilled") {
-          showStatus("Last refresh " + new Date().toLocaleTimeString());
-        } else {
-          showStatus("Unable to refresh middleware health.", true);
-        }
-      }
-
-      byId("unlock-form").addEventListener("submit", async event => {
-        event.preventDefault();
-        if (session) return;
-        const input = byId("admin-key");
-        const key = input.value;
-        input.value = "";
-        if (!/^[A-Za-z0-9_-]{32,128}$/.test(key)) {
-          showStatus("Enter the 32–128 character admin API key.", true);
-          return;
-        }
-        const active = { key, abort: new AbortController() };
-        session = active;
-        byId("unlock").disabled = true;
-        showStatus("Checking admin key…");
-        try {
-          await request(active, routes.health);
-          if (session !== active) return;
-          unlocked = true;
-          byId("unlock-panel").hidden = true;
-          byId("console").hidden = false;
-          byId("refresh").focus();
-          timer = setInterval(refresh, 10000);
-          await refresh();
-        } catch {
-          if (active === session) lock("Could not unlock the dashboard. Check the middleware connection.", true);
-        }
-      });
-
-      byId("command-form").addEventListener("submit", async event => {
-        event.preventDefault();
-        const active = session;
-        if (!active || !unlocked) return;
-        let batch;
-        try {
-          batch = JSON.parse(byId("batch").value);
-          if (!batch || !Array.isArray(batch.commands)) throw new Error();
-        } catch {
-          showStatus('Enter a JSON object with a "commands" array.', true, "operator-status");
-          return;
-        }
-        byId("queue").disabled = true;
-        try {
-          const result = await request(active, "/api/manual-command", "POST", JSON.stringify(batch));
-          if (active !== session) return;
-          showStatus("Queued commands: " + result.command_count, false, "operator-status");
-          await refresh();
-        } catch (error) {
-          if (active === session) showStatus(error.message, true, "operator-status");
-        } finally {
-          if (active === session) byId("queue").disabled = false;
-        }
-      });
-
-      byId("reset").addEventListener("click", async () => {
-        const active = session;
-        if (!active || !unlocked || !window.confirm("Reset current session data and the command log?")) return;
-        byId("reset").disabled = true;
-        try {
-          await request(active, "/api/reset", "POST");
-          if (active !== session) return;
-          showStatus("Session data reset.", false, "operator-status");
-          await refresh();
-        } catch (error) {
-          if (active === session) showStatus(error.message, true, "operator-status");
-        } finally {
-          if (active === session) byId("reset").disabled = false;
-        }
-      });
-      byId("view").addEventListener("change", refresh);
-      byId("refresh").addEventListener("click", refresh);
-      byId("lock").addEventListener("click", () => {
-        lock("Dashboard locked.");
-        byId("admin-key").focus();
-      });
-      window.addEventListener("pagehide", () => lock(""));
-    })();
+GODMODE_DASHBOARD_SCRIPT
   </script>
 </body>
 </html>

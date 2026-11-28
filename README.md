@@ -43,6 +43,11 @@ ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:18080:127.0.0.1:8080 your-user@y
 
 Open `http://127.0.0.1:18080/dashboard` on that workstation. The dashboard's protected API calls use `X-API-Key` with the admin key (`GODMODE_API_KEY`). Retrieve that value from `middleware/.env` on the VPS in a private editor and enter it in the dashboard on a trusted workstation. Do not put it in a URL, shell command, addon, or support message.
 
+For an Everon match, select **Everon · satellite** to see player, friendly AI,
+enemy AI, and vehicle tracks on the actual terrain. The dashboard also shows
+reported objectives and recent Game Master decisions, with broadcast and clock
+controls under **Admin commands**. See [tactical dashboard operation](docs/OPERATIONS.md#tactical-dashboard).
+
 ## Play a match with the addon
 
 1. Install the Arma Reforger dedicated server separately using SteamCMD. Generate a private server config and verify the vanilla server before adding the mod. [Dedicated-server setup](docs/SERVER_SETUP.md)

@@ -36,6 +36,7 @@ jobs:
           python -m pip check
           python -m unittest discover -s tests
           python -m pytest -q middleware/test_runtime_security.py middleware/test_side_operations.py
+          node --test tests/test_tactical_dashboard.cjs
           for script in scripts/bootstrap-release.sh scripts/bootstrap-vps.sh scripts/install-vps.sh middleware/start.sh scripts/stop.sh; do
             bash -n "$script"
           done
@@ -71,12 +72,25 @@ jobs:
       - name: Install from the release bundle and confirm the private defaults
         working-directory: ${{ runner.temp }}/release-smoke
         run: |
-          chmod 0600 middleware/server.py middleware/dashboard.html
+          chmod 0600 middleware/server.py middleware/dashboard.html middleware/dashboard.js middleware/everon-map.jpg
           bash scripts/install-vps.sh
           test "$(docker compose --env-file middleware/.env port middleware 8000)" = '127.0.0.1:8080'
           test "$(curl -fsS http://127.0.0.1:8080/health)" = '{"status":"ok"}'
           test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/health)" = 401
           docker compose --env-file middleware/.env exec -T middleware python -c 'import os; assert os.getuid() == 10001 and os.environ["GODMODE_RECORD_REPLAYS"] == "false"'
+          docker compose --env-file middleware/.env exec -T middleware python - <<'PY'
+          import hashlib, os, urllib.request
+
+          origin = "http://127.0.0.1:8000"
+          with urllib.request.urlopen(origin + "/dashboard", timeout=5) as response:
+              html = response.read().decode()
+              assert "Chat with the Game Master" in html and "GODMODE_DASHBOARD_SCRIPT" not in html
+          headers = {"X-API-Key": os.environ["GODMODE_API_KEY"]}
+          map_request = urllib.request.Request(origin + "/api/dashboard/maps/everon", headers=headers)
+          with urllib.request.urlopen(map_request, timeout=5) as response:
+              assert response.headers["Content-Type"] == "image/jpeg"
+              assert hashlib.sha256(response.read()).hexdigest() == "c2c86822d9b3aaa49c5defbd8b1f09d2c982f6cbd0dea5b307cb74b029e50d63"
+          PY
           bash scripts/stop.sh
       - name: Stop the isolated test stack
         if: always()

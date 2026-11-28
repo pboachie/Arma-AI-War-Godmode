@@ -18,6 +18,42 @@ docker compose --env-file middleware/.env logs --tail=80 middleware
 
 Use `/api/health` with the admin key or check the dashboard via its [SSH tunnel](../README.md#open-the-dashboard) for details. The dashboard page can load without the admin key, but its protected data calls require the key. Check that the published middleware port is on `127.0.0.1` only and no game or RCON ports are published by Compose. If you changed `GODMODE_PORT`, use the matching host port for health checks, the tunnel destination, and the game bridge. Review logs privately and redact them before sharing. Docker inspection and resolved Compose configuration can reveal credentials.
 
+## Tactical dashboard
+
+Unlock with the admin API key over the existing SSH tunnel. Choose **Everon ·
+satellite** only for a scenario using the Eden/Everon terrain, including AI War
+– Everon. Core SITREPs do not identify the terrain. Set
+`GODMODE_DASHBOARD_MAP=everon` in the deployed `middleware/.env` to preselect it
+for that server on the next middleware recreation. Leave it unset for other
+maps or if you change terrains frequently.
+
+Use **Focus players**, the layer toggles, or select a track for its faction,
+order, health, and location when the game reports those details. The map is a
+north-up 12.8 km satellite capture with a 1 km grid. It uses the live report's
+X and Z coordinates and deliberately skips unlocated tracks. Counts show the
+players or AI tracks the addon reports, not every NPC or vehicle in the world.
+Objectives and Side Operations appear beside the map as reported by the game.
+The current bridge does not supply positions for every objective.
+
+Switch to **AI operations** to see planner phase, turn, planned actions and
+recent Game Master decisions. **Chat** asks the configured model for an
+advisory explanation based on a bounded current briefing. It uses the same
+provider limits as game decisions and does not insert orders into the match.
+Questions and replies stay in the tab rather than becoming a game transcript.
+
+The page checks for new reports every 10 seconds. Positions change on SITREPs,
+not every game frame. After 75 seconds without a recent report, the dashboard
+labels positions stale. A failed read marks them unavailable, and the last
+known markers are dimmed. A queued command or a Game Master decision is not
+proof that the game executed it.
+
+Use **Admin commands** for a broadcast or time change. Raw API views, existing
+JSON batch commands, and session reset remain in **Diagnostics & advanced
+commands**. The browser never calls an external tile provider and uses the
+admin key for the map image as well as telemetry. See the bundled [Everon map
+notice](../middleware/everon-map.NOTICE.md) for the imagery and location data
+license and calibration.
+
 For an install from a release archive, read the source SHA and tag from `RELEASE.json` instead of using Git.
 
 ## Back up

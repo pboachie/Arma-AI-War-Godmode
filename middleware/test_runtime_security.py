@@ -649,9 +649,93 @@ def test_dashboard_is_a_nonced_shell_without_external_code(runtime):
     assert first.text.count(f'nonce="{nonce}"') == 2
     assert nonce not in second.headers["content-security-policy"]
     assert "connect-src 'self'" in policy and "'unsafe-inline'" not in policy
+    assert "img-src blob:" in policy
     assert ADMIN not in first.text and GAME not in first.text
     assert '<div id="console" hidden>' in first.text
     for missing in ("<script src=", "<link", "innerHTML", "EventSource", "localStorage", "sessionStorage"):
         assert missing not in first.text
     assert 'mode: "same-origin", redirect: "error"' in first.text
     assert ".textContent" in first.text
+
+
+def test_dashboard_everon_image_requires_only_the_admin_key(runtime):
+    import hashlib
+
+    client = TestClient(runtime().app)
+    path = "/api/dashboard/maps/everon"
+    assert client.get(path).status_code == 401
+    assert client.get(path, headers=GAME_HEADER).status_code == 401
+    assert client.get("/api/dashboard/maps/anything-else", headers=ADMIN_HEADER).status_code == 404
+    image = client.get(path, headers=ADMIN_HEADER)
+    assert image.status_code == 200
+    assert image.headers["content-type"] == "image/jpeg"
+    assert image.headers["cache-control"] == "no-store"
+    assert hashlib.sha256(image.content).hexdigest() == "c2c86822d9b3aaa49c5defbd8b1f09d2c982f6cbd0dea5b307cb74b029e50d63"
+
+
+def test_dashboard_terrain_setting_is_an_allowlisted_hint(runtime, monkeypatch):
+    client = TestClient(runtime().app)
+    monkeypatch.delenv("GODMODE_DASHBOARD_MAP", raising=False)
+    assert 'data-terrain=""' in client.get("/dashboard").text
+    monkeypatch.setenv("GODMODE_DASHBOARD_MAP", "everon")
+    assert 'data-terrain="everon"' in client.get("/dashboard").text
+    monkeypatch.setenv("GODMODE_DASHBOARD_MAP", '"test-attribute="injected')
+    html = client.get("/dashboard").text
+    assert 'data-terrain=""' in html
+    assert "test-attribute" not in html
+
+
+def test_command_log_accepts_a_bounded_display_limit(runtime):
+    app = runtime()
+    client = TestClient(app.app)
+    for i in range(24):
+        app.command_log.append({"timestamp": i, "source": "manual", "commands": []})
+    path = "/api/command-log"
+    assert client.get(path + "?limit=12", headers=GAME_HEADER).status_code == 401
+    data = client.get(path + "?limit=12", headers=ADMIN_HEADER).json()
+    assert data["total"] == 24
+    assert [row["timestamp"] for row in data["commands"]] == list(range(12, 24))
+    assert len(client.get(path, headers=ADMIN_HEADER).json()["commands"]) == 24
+    for invalid in ("0", "-1", "51", "not-an-integer"):
+        assert client.get(path + "?limit=" + invalid, headers=ADMIN_HEADER).status_code == 422
+
+
+def test_operator_chat_is_admin_only_grounded_and_advisory(runtime, monkeypatch):
+    server = runtime()
+    path = "/api/dashboard/chat"
+    body = {"messages": [{"role": "user", "text": "What is happening?"}]}
+    with TestClient(server.app) as client:
+        assert client.post(path, json=body).status_code == 401
+        assert client.post(path, headers=GAME_HEADER, json=body).status_code == 401
+        assert client.post(path, headers=ADMIN_HEADER, json=body).status_code == 503
+        for messages in ([], [{"role": "system", "text": "test"}], [{"role": "assistant", "text": "test"}],
+                         [{"role": "user", "text": " "}], [{"role": "user", "text": "a" * 1601}]):
+            assert client.post(path, headers=ADMIN_HEADER, json={"messages": messages}).status_code == 400
+        assert client.post(path, headers=ADMIN_HEADER, content=b"x" * 50000).status_code == 413
+        server.game_history.append({"timestamp": time.time() - 3, "state": {
+            "mission_id": "smoke", "player_count": 1, "objective": "Hold Morton",
+            "players": [{"name": "unshared-player-identifier"}], "enemy_units": [{}],
+        }})
+        fake_reply = SimpleNamespace(content=json.dumps({"reply": "The reported objective is Hold Morton."}))
+        invoke = AsyncMock(return_value=fake_reply)
+        monkeypatch.setattr(server, "_llm_enabled", lambda: True)
+        monkeypatch.setattr(server, "_get_llm", lambda: object())
+        monkeypatch.setattr(server, "_invoke_llm_with_retry", invoke)
+        answer = client.post(path, headers=ADMIN_HEADER, json=body)
+        assert answer.status_code == 200
+        assert answer.json()["reply"] == "The reported objective is Hold Morton."
+        assert answer.json()["report_age_seconds"] >= 3
+        prompts = invoke.await_args.args[1]
+        assert "Hold Morton" in prompts[-1].content
+        assert "unshared-player-identifier" not in prompts[-1].content
+        assert "cannot execute orders" in prompts[0].content
+        assert not server.pending_manual_commands and not server.command_log and not server._session_histories
+        assert client.get("/api/pending-commands", headers=GAME_HEADER).json() == EMPTY_BATCH
+
+        invoke.return_value = SimpleNamespace(content='{"commands":[{"command_type":"move"}]}')
+        assert client.post(path, headers=ADMIN_HEADER, json=body).status_code == 502
+        invoke.side_effect = RuntimeError("private-provider-error")
+        failure = client.post(path, headers=ADMIN_HEADER, json=body)
+        assert failure.status_code == 502 and "private-provider-error" not in failure.text
+        monkeypatch.setattr(server, "_circuit_open_until", time.time() + 60)
+        assert client.post(path, headers=ADMIN_HEADER, json=body).status_code == 503

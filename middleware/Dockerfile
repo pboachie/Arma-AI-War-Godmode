@@ -15,6 +15,7 @@ WORKDIR /app
 # Keep the non-root reader independent of the operator's checkout umask.
 COPY --chmod=0444 server.py agents.py scaling_engine.py tactical_objectives.py auth.py dashboard.html \
      server_integration.py server_manager.py rcon_client.py a2s_client.py side_operations.py ./
+COPY --chmod=0444 dashboard.js everon-map.jpg everon-map.NOTICE.md ./
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
